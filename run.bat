@@ -7,5 +7,5 @@ if not exist .venv (
 start "" .venv\Scripts\pythonw -m proxion
 goto :eof
 :nopython
-echo Python 3.11+ is needed. Get it from https://www.python.org/downloads/ and tick "Add to PATH".
+echo Python 3.12+ is needed. Get it from https://www.python.org/downloads/ and tick "Add to PATH".
 pause

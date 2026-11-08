@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from . import config as cfgmod
 
@@ -22,17 +23,35 @@ def _mitmdump() -> list[str]:
     return [sys.executable, "-c", "import sys; from mitmproxy.tools.main import mitmdump; sys.exit(mitmdump())"]
 
 
+# Only asset traffic is decrypted. Logins, cookies and everything else Roblox sends
+# pass through untouched, so a bug here can never see them.
+INTERCEPT_HOSTS = r"^assetdelivery\.roblox\.com:\d+$"
+PROCESS_NAME_RE = re.compile(r"[A-Za-z0-9_.\- ]{1,64}")
+
+
 def build_command(cfg: cfgmod.Config) -> list[str]:
     cmd = _mitmdump() + [
-        "-s", str(ADDON),
-        "--set", f"confdir={cfgmod.cert_dir()}",
-        "--set", "flow_detail=0",
-        "--set", "termlog_verbosity=warn",
+        "-s",
+        str(ADDON),
+        "--set",
+        f"confdir={cfgmod.cert_dir()}",
+        "--set",
+        f"allow_hosts={INTERCEPT_HOSTS}",
+        "--set",
+        "flow_detail=0",
+        "--set",
+        "termlog_verbosity=warn",
     ]
     if cfg.proxy_mode == "local":
+        if not PROCESS_NAME_RE.fullmatch(cfg.capture_process):
+            raise ValueError(f"invalid process name: {cfg.capture_process!r}")
         cmd += ["--mode", f"local:{cfg.capture_process}"]
     else:
-        cmd += ["--mode", "regular", "--listen-port", str(cfg.proxy_port)]
+        port = int(cfg.proxy_port)
+        if not 1 <= port <= 65535:
+            raise ValueError(f"invalid port: {port}")
+        # localhost only: never an open proxy for the rest of the network
+        cmd += ["--mode", "regular", "--set", "listen_host=127.0.0.1", "--listen-port", str(port)]
     return cmd
 
 
@@ -61,7 +80,8 @@ class ProxyRunner:
 
     def _pump(self) -> None:
         proc = self.proc
-        assert proc and proc.stdout
+        if proc is None or proc.stdout is None:
+            return
         for line in proc.stdout:
             self.on_output(line.rstrip())
         self.on_output(f"[proxy exited with code {proc.wait()}]")

@@ -6,11 +6,28 @@ from proxion import config as cfgmod
 
 FLEASION = {
     "replacement_rules": [
-        {"name": "Sword texture", "replace_ids": [123456789, "7547298786:1"], "mode": "id", "with_id": 987654321, "enabled": True},
+        {
+            "name": "Sword texture",
+            "replace_ids": [123456789, "7547298786:1"],
+            "mode": "id",
+            "with_id": 987654321,
+            "enabled": True,
+        },
         {"name": "Hide hats", "replace_ids": ["Hat"], "mode": "remove", "enabled": True},
-        {"type": "group", "name": "Folder", "expanded": True, "children": [
-            {"name": "Custom mesh", "replace_ids": [111111], "mode": "local", "local_path": "/StickObj/stick.obj", "enabled": True},
-        ]},
+        {
+            "type": "group",
+            "name": "Folder",
+            "expanded": True,
+            "children": [
+                {
+                    "name": "Custom mesh",
+                    "replace_ids": [111111],
+                    "mode": "local",
+                    "local_path": "/StickObj/stick.obj",
+                    "enabled": True,
+                },
+            ],
+        },
     ]
 }
 
@@ -62,9 +79,17 @@ def test_config_management():
 
 def test_migrates_old_proxion_rules(home):
     home.mkdir(parents=True, exist_ok=True)
-    (home / "config.json").write_text(json.dumps({"rules": [
-        {"name": "sky", "targets": [111111], "mode": "id", "replacement": "999999"},
-        {"name": "f", "targets": [222222], "mode": "file", "replacement": "C:/a.png"}], "proxy_port": 9000}))
+    (home / "config.json").write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {"name": "sky", "targets": [111111], "mode": "id", "replacement": "999999"},
+                    {"name": "f", "targets": [222222], "mode": "file", "replacement": "C:/a.png"},
+                ],
+                "proxy_port": 9000,
+            }
+        )
+    )
     s = cfgmod.load_settings()
     assert s.proxy_port == 9000
     rules = cfgmod.read_config("Default")["replacement_rules"]

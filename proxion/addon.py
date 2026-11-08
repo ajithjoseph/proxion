@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -37,6 +39,8 @@ from proxion import config as cfgmod  # noqa: E402
 
 ASSET_HOST = "assetdelivery.roblox.com"
 FILE_PREFIX = "/proxion-file/"
+MAX_SERVE_BYTES = 200 * 1024 * 1024  # no Roblox asset is anywhere near this
+MAX_LOG_BYTES = 5 * 1024 * 1024  # assets.jsonl is rotated to assets.jsonl.1 past this
 ASSET_TYPES = cfgmod.ASSET_TYPES
 
 
@@ -48,7 +52,9 @@ class Proxion:
         self._stamp = None
         self._checked = 0.0
         self.rules = cfgmod.Compiled()
-        self.files: dict[int, str] = {}  # key -> local path we promised to serve
+        self.files: dict[str, str] = {}  # random token -> local path we promised to serve
+        self._tokens: dict[str, str] = {}  # local path -> its token, so the maps stay small
+        self._writes = 0
         self.reload(force=True)
 
     # ---- rules ---------------------------------------------------------
@@ -78,10 +84,22 @@ class Proxion:
     def _log(self, **entry) -> None:
         entry["time"] = time.time()
         try:
+            self._writes += 1
+            if self._writes % 200 == 0 and self.log_file.exists() and self.log_file.stat().st_size > MAX_LOG_BYTES:
+                os.replace(self.log_file, self.log_file.with_name(self.log_file.name + ".1"))
             with open(self.log_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
         except OSError:
             pass
+
+    def _file_url(self, path: str) -> str:
+        """URL Roblox can fetch a local file from. Tokens are random so they can't be guessed."""
+        token = self._tokens.get(path)
+        if token is None:
+            token = secrets.token_urlsafe(16)
+            self._tokens[path] = token
+            self.files[token] = path
+        return f"https://{ASSET_HOST}{FILE_PREFIX}{token}"
 
     # ---- mitmproxy hooks -----------------------------------------------
     def request(self, flow: http.HTTPFlow) -> None:
@@ -119,9 +137,8 @@ class Proxion:
         for item in items:
             if not isinstance(item, dict) or "assetId" not in item:
                 continue
-            try:
-                asset_id = int(item["assetId"])
-            except (TypeError, ValueError):
+            asset_id = cfgmod.as_asset_id(item["assetId"])
+            if asset_id is None:
                 continue
             action = self.rules.by_id.get(asset_id)
             if action and action[0] == cfgmod.MODE_ID:
@@ -150,10 +167,13 @@ class Proxion:
             if action is None and isinstance(type_id, int):
                 action = self.rules.by_type.get(type_id)  # whole-type rule
             if original is not None:
-                self._log(assetId=original, typeId=type_id,
-                          type=ASSET_TYPES.get(type_id, str(type_id) if type_id else "?"),
-                          action=action[0] if action else "none",
-                          replacement=action[1] if action else None)
+                self._log(
+                    assetId=original,
+                    typeId=type_id,
+                    type=ASSET_TYPES.get(type_id, str(type_id) if type_id else "?"),
+                    action=action[0] if action else "none",
+                    replacement=action[1] if action else None,
+                )
             if not action or action[0] == cfgmod.MODE_ID:
                 continue
             kind, value = action
@@ -163,9 +183,7 @@ class Proxion:
                 res["errors"] = [{"code": 404, "message": "Removed by Proxion"}]
             else:
                 if kind == cfgmod.MODE_LOCAL:
-                    key = original if original is not None else id(res)
-                    self.files[key] = value
-                    value = f"https://{ASSET_HOST}{FILE_PREFIX}{key}"
+                    value = self._file_url(value)
                 res.pop("errors", None)
                 res["locations"] = [{"assetFormat": "source", "location": value}]
         if changed:
@@ -174,13 +192,17 @@ class Proxion:
     # ---- legacy single asset endpoint ----------------------------------
     def _rewrite_single(self, flow: http.HTTPFlow) -> None:
         q = flow.request.query
-        key = next((k for k in q.keys() if k.lower() == "id"), None)
-        if key is None or not q[key].isdigit():
+        key = next((k for k in q if k.lower() == "id"), None)
+        asset_id = cfgmod.as_asset_id(q[key]) if key is not None else None
+        if asset_id is None:
             return
-        asset_id = int(q[key])
         action = self.rules.by_id.get(asset_id)
-        self._log(assetId=asset_id, type="?", action=action[0] if action else "none",
-                  replacement=action[1] if action else None)
+        self._log(
+            assetId=asset_id,
+            type="?",
+            action=action[0] if action else "none",
+            replacement=action[1] if action else None,
+        )
         if not action:
             return
         kind, value = action
@@ -190,21 +212,30 @@ class Proxion:
             flow.response = http.Response.make(404, b"Removed by Proxion")
         else:
             if kind == cfgmod.MODE_LOCAL:
-                self.files[asset_id] = value
-                value = f"https://{ASSET_HOST}{FILE_PREFIX}{asset_id}"
+                value = self._file_url(value)
             flow.response = http.Response.make(302, b"", {"Location": value})
 
     # ---- local files ---------------------------------------------------
     def _serve_file(self, flow: http.HTTPFlow) -> None:
-        raw = flow.request.path[len(FILE_PREFIX):].split("?")[0]
-        path = self.files.get(int(raw)) if raw.isdigit() else None
+        # Only Roblox's own HTTPS GETs, never plain HTTP from something else on the network.
+        if flow.request.scheme != "https" or flow.request.method != "GET":
+            flow.response = http.Response.make(404, b"Not found")
+            return
+        token = flow.request.path[len(FILE_PREFIX) :].split("?")[0]
+        path = self.files.get(token)
         if path is None:
             flow.response = http.Response.make(404, b"Unknown Proxion file")
             return
         try:
-            data = Path(path).read_bytes()
+            file = Path(path)
+            if not file.is_file():
+                raise OSError("not a regular file")
+            if file.stat().st_size > MAX_SERVE_BYTES:
+                raise OSError("file is too big")
+            data = file.read_bytes()
         except OSError as e:
-            flow.response = http.Response.make(404, f"Proxion could not read file: {e}".encode())
+            print(f"[proxion] could not serve {path}: {e}")
+            flow.response = http.Response.make(404, b"Proxion could not read the replacement file")
             return
         ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
         flow.response = http.Response.make(200, data, {"Content-Type": ctype})

@@ -1,0 +1,6 @@
+# Everything CI needs to test and build Proxion.exe. Lock with:
+#   uv pip compile requirements-build.in --universal --python-version 3.12 --generate-hashes -o requirements-build.lock
+mitmproxy>=12,<13
+pyinstaller>=6,<7
+pytest>=8
+ruff>=0.6
