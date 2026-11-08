@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import config as cfgmod
@@ -117,7 +118,7 @@ def _strip_block(text: str) -> str:
     return text
 
 
-def is_running() -> bool:
+def is_running(names: tuple[str, ...] = PROCESS_NAMES) -> bool:
     if sys.platform != "win32":
         return False
     try:
@@ -129,19 +130,34 @@ def is_running() -> bool:
         ).stdout.lower()
     except OSError:
         return False
-    return any(p.lower() in out for p in PROCESS_NAMES)
+    return any(p.lower() in out for p in names)
 
 
 def cache_paths() -> list[Path]:
+    """Roblox's asset cache, the same set Fleasion clears, for the normal and Microsoft Store apps."""
     temp = Path(os.environ.get("TEMP", _local_appdata() / "Temp"))
-    rbx = _local_appdata() / "Roblox"
-    return [
-        temp / "Roblox" / "http",  # older HTTP cache
-        rbx / "rbx-storage",  # newer content cache
-        rbx / "rbx-storage.db",
-        rbx / "rbx-storage.db-wal",
-        rbx / "rbx-storage.db-shm",
-    ]
+    paths = [temp / "Roblox" / "http"]  # older HTTP cache
+    for root in (_local_appdata() / "Roblox", _local_appdata() / "RobloxPCGDK"):
+        paths += [root / "rbx-storage", root / "rbx-storage-sc", root / "rbx-storage.id"]
+        paths += [root / f"rbx-storage.db{suffix}" for suffix in ("", "-wal", "-shm", "-journal")]
+    return paths
+
+
+def close_roblox() -> bool:
+    """Force close the Roblox player. Returns True if it's no longer running."""
+    if sys.platform != "win32":
+        return not is_running()
+    for name in PROCESS_NAMES[:1]:  # only the player, never Studio (unsaved work)
+        subprocess.run(
+            ["taskkill", "/F", "/IM", name],
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    for _ in range(20):
+        if not is_running(PROCESS_NAMES[:1]):
+            return True
+        time.sleep(0.25)
+    return False
 
 
 def clear_cache() -> list[Path]:

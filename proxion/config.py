@@ -150,6 +150,8 @@ class Settings:
     capture_process: str = "RobloxPlayerBeta"
     proxy_mode: str = "local"  # "local" grabs only Roblox, "regular" listens on proxy_port
     proxy_port: int = 8080
+    clear_cache_on_start: bool = True  # like Fleasion: clear Roblox's cache when the proxy starts
+    seen_welcome: bool = False  # first run shows the welcome and the Help tab
 
     @classmethod
     def from_dict(cls, d: dict) -> Settings:
