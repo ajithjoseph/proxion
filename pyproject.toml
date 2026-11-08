@@ -2,8 +2,8 @@
 name = "proxion"
 version = "0.1.0"
 description = "Local proxy that swaps Roblox assets (textures, sounds, meshes) on your own client"
-requires-python = ">=3.11"
-dependencies = ["mitmproxy>=11"]
+requires-python = ">=3.12"
+dependencies = ["mitmproxy>=12,<13"]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
@@ -20,7 +20,7 @@ packages = ["proxion"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 # pyflakes, pycodestyle, isort, bugbear, pyupgrade, bandit (security), simplify

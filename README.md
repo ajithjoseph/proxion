@@ -16,13 +16,17 @@ for other ones, for your own files, or remove them. Changes only show up on **yo
 Roblox only trusts its own certificate list (`ssl/cacert.pem` inside each version folder), so
 Proxion adds its certificate there. Bloxstrap and Fishstrap installs are handled too.
 
+Only `assetdelivery.roblox.com` is decrypted. Logins, cookies and every other Roblox
+connection go straight through without Proxion seeing them.
+
 ## Getting Proxion.exe
 
 Proxion builds into one `Proxion.exe`, no Python needed to run it. Two ways to get it:
 
-* **GitHub (no setup):** push this folder to a GitHub repo. The workflow in
-  `.github/workflows/build.yml` builds the exe on Windows, tests it, and puts it under the
-  run's *Artifacts*. Push a tag like `v0.1.0` and it also attaches the exe to a Release.
+* **GitHub Releases:** download `Proxion.exe` and `Proxion.exe.sha256` from the Releases page.
+  Every build also shows up under the *Actions* tab as an artifact. The workflow
+  (`.github/workflows/build.yml`) lints, tests, builds and smoke tests the exe on Windows.
+  Pushing a tag like `v0.2.0` publishes a Release.
 * **Your own PC:** install Python 3.12+ from python.org, then double click `build.bat`.
   The exe lands in `dist\Proxion.exe`.
 
@@ -95,9 +99,55 @@ python -m proxion clear-cache
   foliage) can get you banned by that game, and editing the client is against the Roblox
   Terms of Use, so it's at your own risk.
 
-## Tests
+## Security
+
+Proxion is a man-in-the-middle proxy, so it's built to keep that power small:
+
+* **Only asset traffic is intercepted.** mitmproxy runs with `allow_hosts` set to
+  `assetdelivery.roblox.com`. Everything else Roblox sends passes through untouched.
+* **Nothing on your network can use it.** Local capture mode has no network port at all.
+  Regular mode listens on `127.0.0.1` only.
+* **The certificate is only trusted by Roblox.** It's added to Roblox's own `cacert.pem`, never
+  to Windows. The private key stays in `%APPDATA%\Proxion\certs`. Use **Remove certificate**
+  to undo it. Note that a Roblox install under Program Files is shared by every Windows user
+  on the PC, so they would trust your certificate too.
+* **Configs from other people are checked.**
+  * Network paths (`\\server\share`), device paths, environment variables and Windows
+    device names are refused, because opening a network path makes Windows send your login
+    hash to that server.
+  * Download links must be `https://` and can't point at your own PC, a bare IP or your LAN.
+  * Before a config that uses files outside the configs folder, or downloads from the web,
+    gets turned on, Proxion shows you exactly what it touches and asks first.
+  * Oversized (over 20 MB) and absurdly nested files are rejected, and broken entries are
+    skipped instead of crashing the app.
+* **Local files are served under random links** over HTTPS GET only, never by asset ID, and
+  only regular files under 200 MB.
+* **Logs can't fill your disk.** The asset log rotates at 5 MB and the window keeps the last
+  5,000 assets.
+* **Builds are reproducible and traceable.** CI installs exact versions with hash checking
+  (`requirements-build.lock`), pins every GitHub Action to a commit, runs with a read-only
+  token, and publishes a SHA-256 checksum plus a signed build provenance attestation. Check a
+  download with:
+
+  ```
+  gh attestation verify Proxion.exe --repo ajithjoseph/proxion
+  ```
+
+Found a security problem? Please open a private security advisory on GitHub rather than a
+public issue.
+
+## Development
 
 ```
+python -m venv .venv
+.venv\Scripts\activate
 pip install -e .[dev]
+ruff check . && ruff format --check .
 pytest
+```
+
+The build dependencies are locked with hashes. After changing `requirements-build.in`, update the lock:
+
+```
+uv pip compile requirements-build.in --universal --python-version 3.12 --generate-hashes -o requirements-build.lock
 ```
