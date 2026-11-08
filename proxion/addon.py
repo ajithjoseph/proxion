@@ -5,15 +5,16 @@ https://assetdelivery.roblox.com/v1/assets/batch like
 
     [{"assetId": 123, "requestId": "0", ...}, ...]
 
-and gets back CDN locations for each one. Older code paths also use
+and gets back CDN locations for each one. Older code paths use
 GET /v1/asset?id=123 which redirects to the CDN.
 
-Proxion hooks both:
-  * "id" rules rewrite the assetId in the request, so Roblox is handed the
-    replacement asset's CDN link instead.
-  * "file" rules point the location at a fake path on assetdelivery that this
-    addon answers itself with the bytes of a local file.
-  * "remove" rules answer with a 404 style error for that asset.
+For each asset that matches a rule in an enabled config:
+  * id:     the assetId in the request is swapped, so Roblox gets the other asset.
+  * local:  the location points at a fake path this addon answers with the file.
+  * cdn:    the location points at the rule's URL.
+  * remove: Roblox is told the asset doesn't exist.
+Rules can also target a whole asset type ("Hat", "Decal", ...). Those are
+applied once the response says what type each asset is.
 
 Every asset seen is appended to assets.jsonl so the GUI can show it.
 
@@ -24,7 +25,6 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import os
 import sys
 import time
 from pathlib import Path
@@ -37,49 +37,42 @@ from proxion import config as cfgmod  # noqa: E402
 
 ASSET_HOST = "assetdelivery.roblox.com"
 FILE_PREFIX = "/proxion-file/"
-
-ASSET_TYPES = {
-    1: "Image", 2: "TShirt", 3: "Audio", 4: "Mesh", 5: "Lua", 8: "Hat",
-    10: "Model", 11: "Shirt", 12: "Pants", 13: "Decal", 17: "Head",
-    18: "Face", 19: "Gear", 24: "Animation", 38: "Plugin", 39: "SolidModel",
-    40: "MeshPart", 41: "HairAccessory", 61: "EmoteAnimation", 62: "Video",
-    63: "TexturePack", 73: "FontFamily",
-}
+ASSET_TYPES = cfgmod.ASSET_TYPES
 
 
 class Proxion:
-    def __init__(self, config_file: Path | None = None, log_file: Path | None = None):
-        self.config_file = config_file or cfgmod.config_path()
+    def __init__(self, compiler=None, log_file: Path | None = None):
+        # compiler() returns a config.Compiled. Tests pass their own.
+        self.compiler = compiler or cfgmod.compile_enabled
         self.log_file = log_file or cfgmod.log_path()
-        self._mtime = -1.0
-        self.id_map: dict[int, int] = {}
-        self.file_map: dict[int, str] = {}
-        self.remove: set[int] = set()
-        self.reload()
+        self._stamp = None
+        self._checked = 0.0
+        self.rules = cfgmod.Compiled()
+        self.files: dict[int, str] = {}  # key -> local path we promised to serve
+        self.reload(force=True)
 
     # ---- rules ---------------------------------------------------------
-    def reload(self, force: bool = False) -> None:
-        """Re-read config.json if it changed, so edits apply without a restart."""
+    def _fingerprint(self):
+        """mtimes of settings.json and every config, so edits apply live."""
         try:
-            mtime = self.config_file.stat().st_mtime
-        except FileNotFoundError:
-            mtime = 0.0
-        if not force and mtime == self._mtime:
+            files = [cfgmod.settings_path(), *cfgmod.configs_dir().glob("*.json")]
+            return tuple(sorted((str(f), f.stat().st_mtime_ns) for f in files if f.exists()))
+        except OSError:
+            return None
+
+    def reload(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._checked < 0.5:
             return
-        self._mtime = mtime
-        cfg = cfgmod.load(self.config_file)
-        id_map, file_map, remove = {}, {}, set()
-        for rule in cfg.rules:
-            if not rule.enabled:
-                continue
-            for target in rule.targets:
-                if rule.mode == cfgmod.MODE_ID and rule.replacement.strip().isdigit():
-                    id_map[target] = int(rule.replacement)
-                elif rule.mode == cfgmod.MODE_FILE and rule.replacement:
-                    file_map[target] = rule.replacement
-                elif rule.mode == cfgmod.MODE_REMOVE:
-                    remove.add(target)
-        self.id_map, self.file_map, self.remove = id_map, file_map, remove
+        self._checked = now
+        stamp = self._fingerprint() if self.compiler is cfgmod.compile_enabled else None
+        if not force and stamp == self._stamp:
+            return
+        self._stamp = stamp
+        try:
+            self.rules = self.compiler()
+        except Exception as e:  # a broken config must never kill the proxy
+            print(f"[proxion] could not load configs: {e}")
 
     # ---- logging -------------------------------------------------------
     def _log(self, **entry) -> None:
@@ -96,12 +89,13 @@ class Proxion:
             return
         self.reload()
         path = flow.request.path
+        base = path.split("?")[0].rstrip("/")
 
         if path.startswith(FILE_PREFIX):
             self._serve_file(flow)
-        elif flow.request.method == "POST" and path.split("?")[0].rstrip("/") == "/v1/assets/batch":
+        elif flow.request.method == "POST" and base == "/v1/assets/batch":
             self._rewrite_batch_request(flow)
-        elif flow.request.method == "GET" and path.split("?")[0].rstrip("/") == "/v1/asset":
+        elif flow.request.method == "GET" and base == "/v1/asset":
             self._rewrite_single(flow)
 
     def response(self, flow: http.HTTPFlow) -> None:
@@ -120,8 +114,7 @@ class Proxion:
         if not isinstance(items, list):
             return
 
-        # requestId -> (original id, action, value)
-        tracked: dict[str, tuple[int, str, object]] = {}
+        tracked: dict[str, tuple[int, tuple | None]] = {}  # requestId -> (original id, action)
         changed = False
         for item in items:
             if not isinstance(item, dict) or "assetId" not in item:
@@ -130,17 +123,11 @@ class Proxion:
                 asset_id = int(item["assetId"])
             except (TypeError, ValueError):
                 continue
-            req_id = str(item.get("requestId", ""))
-            action = None
-            if asset_id in self.remove:
-                action = ("remove", None)
-            elif asset_id in self.file_map:
-                action = ("file", self.file_map[asset_id])
-            elif asset_id in self.id_map:
-                item["assetId"] = self.id_map[asset_id]
+            action = self.rules.by_id.get(asset_id)
+            if action and action[0] == cfgmod.MODE_ID:
+                item["assetId"] = action[1]
                 changed = True
-                action = ("id", self.id_map[asset_id])
-            tracked[req_id] = (asset_id, *(action or ("none", None)))
+            tracked[str(item.get("requestId", ""))] = (asset_id, action)
 
         flow.metadata["proxion_batch"] = tracked
         if changed:
@@ -158,26 +145,29 @@ class Proxion:
         for res in results:
             if not isinstance(res, dict):
                 continue
-            req_id = str(res.get("requestId", ""))
-            original, action, value = tracked.get(req_id, (None, "none", None))
+            original, action = tracked.get(str(res.get("requestId", "")), (None, None))
             type_id = res.get("assetTypeId")
+            if action is None and isinstance(type_id, int):
+                action = self.rules.by_type.get(type_id)  # whole-type rule
             if original is not None:
-                self._log(
-                    assetId=original,
-                    typeId=type_id,
-                    type=ASSET_TYPES.get(type_id, str(type_id) if type_id else "?"),
-                    action=action,
-                    replacement=value,
-                )
-            if action == "remove":
+                self._log(assetId=original, typeId=type_id,
+                          type=ASSET_TYPES.get(type_id, str(type_id) if type_id else "?"),
+                          action=action[0] if action else "none",
+                          replacement=action[1] if action else None)
+            if not action or action[0] == cfgmod.MODE_ID:
+                continue
+            kind, value = action
+            changed = True
+            if kind == cfgmod.MODE_REMOVE:
                 res.pop("locations", None)
                 res["errors"] = [{"code": 404, "message": "Removed by Proxion"}]
-                changed = True
-            elif action == "file":
-                url = f"https://{ASSET_HOST}{FILE_PREFIX}{original}"
+            else:
+                if kind == cfgmod.MODE_LOCAL:
+                    key = original if original is not None else id(res)
+                    self.files[key] = value
+                    value = f"https://{ASSET_HOST}{FILE_PREFIX}{key}"
                 res.pop("errors", None)
-                res["locations"] = [{"assetFormat": "source", "location": url}]
-                changed = True
+                res["locations"] = [{"assetFormat": "source", "location": value}]
         if changed:
             flow.response.set_text(json.dumps(results))
 
@@ -188,27 +178,29 @@ class Proxion:
         if key is None or not q[key].isdigit():
             return
         asset_id = int(q[key])
-        if asset_id in self.remove:
-            self._log(assetId=asset_id, type="?", action="remove", replacement=None)
+        action = self.rules.by_id.get(asset_id)
+        self._log(assetId=asset_id, type="?", action=action[0] if action else "none",
+                  replacement=action[1] if action else None)
+        if not action:
+            return
+        kind, value = action
+        if kind == cfgmod.MODE_ID:
+            q[key] = str(value)
+        elif kind == cfgmod.MODE_REMOVE:
             flow.response = http.Response.make(404, b"Removed by Proxion")
-        elif asset_id in self.file_map:
-            self._log(assetId=asset_id, type="?", action="file", replacement=self.file_map[asset_id])
-            flow.response = http.Response.make(
-                302, b"", {"Location": f"https://{ASSET_HOST}{FILE_PREFIX}{asset_id}"}
-            )
-        elif asset_id in self.id_map:
-            self._log(assetId=asset_id, type="?", action="id", replacement=self.id_map[asset_id])
-            q[key] = str(self.id_map[asset_id])
         else:
-            self._log(assetId=asset_id, type="?", action="none", replacement=None)
+            if kind == cfgmod.MODE_LOCAL:
+                self.files[asset_id] = value
+                value = f"https://{ASSET_HOST}{FILE_PREFIX}{asset_id}"
+            flow.response = http.Response.make(302, b"", {"Location": value})
 
     # ---- local files ---------------------------------------------------
     def _serve_file(self, flow: http.HTTPFlow) -> None:
         raw = flow.request.path[len(FILE_PREFIX):].split("?")[0]
-        if not raw.isdigit() or int(raw) not in self.file_map:
+        path = self.files.get(int(raw)) if raw.isdigit() else None
+        if path is None:
             flow.response = http.Response.make(404, b"Unknown Proxion file")
             return
-        path = os.path.expandvars(os.path.expanduser(self.file_map[int(raw)]))
         try:
             data = Path(path).read_bytes()
         except OSError as e:
@@ -218,4 +210,4 @@ class Proxion:
         flow.response = http.Response.make(200, data, {"Content-Type": ctype})
 
 
-addons = [Proxion()] if __name__ != "__main__" and "pytest" not in sys.modules else []
+addons = [Proxion()] if "pytest" not in sys.modules else []

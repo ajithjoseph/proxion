@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 
 
@@ -9,15 +10,28 @@ def main() -> None:
         mitmdump(sys.argv[2:])
         return
 
+    files = sys.argv[1:]
+    if files and all(os.path.isfile(f) for f in files):
+        # Config files dragged onto Proxion.exe or opened with it.
+        from .gui import main as gui_main
+        gui_main(files)
+        return
+
     p = argparse.ArgumentParser(prog="proxion", description="Roblox asset replacer")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("gui", help="open the window (default)")
     sub.add_parser("install-cert", help="trust Proxion's certificate in every Roblox install")
     sub.add_parser("uninstall-cert", help="remove Proxion's certificate from Roblox")
+    op = sub.add_parser("open", help="open config files (Proxion or Fleasion) in the window")
+    op.add_argument("files", nargs="+")
     sub.add_parser("clear-cache", help="delete Roblox's asset cache")
     sub.add_parser("run", help="run the proxy in this terminal without the window")
     args = p.parse_args()
 
+    if args.cmd == "open":
+        from .gui import main as gui_main
+        gui_main(args.files)
+        return
     if args.cmd in (None, "gui"):
         from .gui import main as gui_main
         gui_main()
