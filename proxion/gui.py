@@ -20,6 +20,13 @@ PANEL = "#1f1f29"
 FG = "#e6e6f0"
 ACCENT = "#7c5cff"
 MUTED = "#8a8aa0"
+MAX_LOG_ROWS = 5000  # assets kept in the Asset log tab
+MAX_OUTPUT_LINES = 1000  # lines kept in the proxy output box
+
+
+def _targets_text(rule: dict) -> str:
+    targets = rule.get("replace_ids") or []
+    return ", ".join(map(str, targets if isinstance(targets, list) else [targets]))
 
 
 class App(tk.Tk):
@@ -226,7 +233,7 @@ class App(tk.Tk):
         ).pack(anchor="w")
         ttk.Radiobutton(
             f,
-            text="Regular proxy on a port (advanced, you route traffic to it yourself)",
+            text="Regular proxy on a port, this PC only (advanced, you route traffic to it yourself)",
             value="regular",
             variable=self.v_pmode,
             command=self._save_settings,
@@ -326,7 +333,11 @@ class App(tk.Tk):
             self.open_files(paths)
 
     def open_files(self, paths) -> None:
-        """Copy config files into the configs folder, turn them on and show the last one."""
+        """Copy config files into the configs folder and show the last one.
+
+        A config is turned on right away unless it uses files outside the configs folder
+        or downloads from the web. Then the user sees what it does and decides.
+        """
         opened, failed, last = [], [], None
         for p in paths:
             try:
@@ -334,18 +345,30 @@ class App(tk.Tk):
             except (OSError, ValueError) as e:
                 failed.append(f"{os.path.basename(p)}: {e}")
                 continue
-            if last not in self.cfg.enabled_configs:
-                self.cfg.enabled_configs.append(last)
             data = cfgmod.read_config(last)
             n = sum(1 for _ in cfgmod.iter_rules(data["replacement_rules"]))
-            skipped = cfgmod.compile_rules([data]).skipped
-            note = f" ({skipped} target(s) Proxion can't use yet, they're kept in the file)" if skipped else ""
-            opened.append(f"{last}: {n} rule(s){note}")
+            compiled = cfgmod.compile_rules([data])
+            notes = cfgmod.review_config(data)
+            turn_on = not notes or messagebox.askyesno(
+                "Proxion",
+                f'Before turning on "{last}", check what it does:\n\n'
+                + "\n".join(f"• {x}" for x in notes[:15])
+                + ("\n• …" if len(notes) > 15 else "")
+                + "\n\nOnly turn it on if you trust where you got it. Turn it on now?",
+            )
+            if turn_on and last not in self.cfg.enabled_configs:
+                self.cfg.enabled_configs.append(last)
+            note = (
+                f" ({compiled.skipped} target(s) Proxion can't use yet, they're kept in the file)"
+                if compiled.skipped
+                else ""
+            )
+            opened.append(f"{last}: {n} rule(s){note}{'' if turn_on else ' (left turned off)'}")
         if last:
             self._switch_config(last)
         msg = ""
         if opened:
-            msg += "Opened and turned on:\n" + "\n".join(opened)
+            msg += "Opened:\n" + "\n".join(opened)
         if failed:
             msg += ("\n\n" if msg else "") + "Could not open:\n" + "\n".join(failed)
         (messagebox.showerror if failed and not opened else messagebox.showinfo)("Proxion", msg)
@@ -404,7 +427,9 @@ class App(tk.Tk):
                 mode = cfgmod.rule_mode(r)
                 kind, value = cfgmod.rule_action(r)
                 shown = (
-                    "(removed)"
+                    f"(ignored: {value})"
+                    if kind == cfgmod.INVALID
+                    else "(removed)"
                     if kind == cfgmod.MODE_REMOVE
                     else {
                         cfgmod.MODE_ID: r.get("with_id"),
@@ -412,7 +437,7 @@ class App(tk.Tk):
                         cfgmod.MODE_CDN: r.get("cdn_url"),
                     }.get(mode, "")
                 )
-                targets = ", ".join(map(str, r.get("replace_ids") or []))
+                targets = _targets_text(r)
                 tv.insert(
                     parent_iid, "end", iid=iid, text=str(r.get("name", "Rule")), values=(on, targets, mode, shown)
                 )
@@ -428,7 +453,7 @@ class App(tk.Tk):
         if not raw:
             messagebox.showerror("Proxion", "Add at least one asset ID (or a type like Hat) to replace.")
             return None
-        targets = [int(t) if t.isdigit() else t for t in raw]
+        targets = [cfgmod.as_asset_id(t) or t for t in raw]
         bad = [str(t) for t in targets if cfgmod.parse_target(t) is None]
         if bad and not messagebox.askyesno(
             "Proxion",
@@ -439,11 +464,21 @@ class App(tk.Tk):
             return None
         mode = self.v_mode.get()
         repl = self.v_repl.get().strip()
-        if mode == cfgmod.MODE_ID and not repl.isdigit():
+        if mode == cfgmod.MODE_ID and cfgmod.as_asset_id(repl) is None:
             messagebox.showerror("Proxion", "Replacement must be a numeric asset ID.")
             return None
         if mode in (cfgmod.MODE_LOCAL, cfgmod.MODE_CDN) and not repl:
             messagebox.showerror("Proxion", "Pick a file or enter a URL for the replacement.")
+            return None
+        problem = (
+            cfgmod.local_path_problem(repl)
+            if mode == cfgmod.MODE_LOCAL
+            else cfgmod.url_problem(repl)
+            if mode == cfgmod.MODE_CDN
+            else None
+        )
+        if problem:
+            messagebox.showerror("Proxion", f"Can't use that replacement: {problem}.")
             return None
         rule = {
             "name": self.v_name.get().strip() or "Rule",
@@ -468,7 +503,7 @@ class App(tk.Tk):
         self.v_enabled.set(r.get("enabled", True) is not False)
         if r.get("type") == "group":
             return
-        self.v_targets.set(", ".join(map(str, r.get("replace_ids") or [])))
+        self.v_targets.set(_targets_text(r))
         mode = cfgmod.rule_mode(r)
         self.v_mode.set(mode)
         self.v_repl.set(
@@ -574,10 +609,14 @@ class App(tk.Tk):
         path = cfgmod.log_path()
         if not path.exists():
             return
-        with open(path, encoding="utf-8") as f:
+        if path.stat().st_size < self.log_pos:  # the proxy rotated the log
+            self.log_pos = 0
+        with open(path, "rb") as f:
             f.seek(self.log_pos)
-            lines = f.readlines()
-            self.log_pos = f.tell()
+            chunk = f.read(2 * 1024 * 1024)  # at most 2 MB per tick so the window stays responsive
+        complete = chunk[: chunk.rfind(b"\n") + 1]  # a half-written line waits for the next tick
+        self.log_pos += len(complete)
+        lines = complete.decode("utf-8", errors="replace").splitlines()
         if not lines:
             return
         for line in lines:
@@ -592,6 +631,8 @@ class App(tk.Tk):
             cur["action"] = e.get("action", "none")
             cur["replacement"] = e.get("replacement")
             cur["hits"] += 1
+        while len(self.seen) > MAX_LOG_ROWS:  # forget the oldest assets
+            del self.seen[next(iter(self.seen))]
         self._redraw_log()
 
     def _redraw_log(self) -> None:
@@ -636,10 +677,15 @@ class App(tk.Tk):
 
     def _install_cert(self, quiet: bool = False) -> None:
         try:
-            patched = roblox.install_cert()
+            patched, failed = roblox.install_cert()
         except OSError as e:
             messagebox.showerror("Proxion", f"Could not install certificate: {e}")
             return
+        if failed:
+            messagebox.showwarning(
+                "Proxion",
+                "Could not install the certificate in:\n" + "\n".join(failed) + "\n\nTry running Proxion as admin.",
+            )
         if not roblox.version_dirs():
             if not quiet:
                 messagebox.showwarning("Proxion", "No Roblox install found. Install Roblox, then try again.")
@@ -652,8 +698,11 @@ class App(tk.Tk):
             )
 
     def _uninstall_cert(self) -> None:
-        n = len(roblox.uninstall_cert())
-        messagebox.showinfo("Proxion", f"Removed the certificate from {n} Roblox folder(s).")
+        cleaned, failed = roblox.uninstall_cert()
+        msg = f"Removed the certificate from {len(cleaned)} Roblox folder(s)."
+        if failed:
+            msg += "\n\nCould not clean:\n" + "\n".join(failed)
+        messagebox.showinfo("Proxion", msg)
 
     def _clear_cache(self) -> None:
         try:
@@ -670,7 +719,10 @@ class App(tk.Tk):
         else:
             self._save_settings()
             self._install_cert(quiet=True)  # Roblox updates make new folders
-            self.runner.start(self.cfg)
+            try:
+                self.runner.start(self.cfg)
+            except (OSError, ValueError) as e:
+                messagebox.showerror("Proxion", f"Could not start the proxy: {e}")
         self._update_status()
 
     def _update_status(self) -> None:
@@ -685,6 +737,9 @@ class App(tk.Tk):
         while not self.out_q.empty():
             self.out_txt.insert("end", self.out_q.get() + "\n")
             self.out_txt.see("end")
+        lines = int(self.out_txt.index("end-1c").split(".")[0])
+        if lines > MAX_OUTPUT_LINES:
+            self.out_txt.delete("1.0", f"{lines - MAX_OUTPUT_LINES}.0")
         self._read_log()
         self._update_status()
         self.after(700, self._tick)
