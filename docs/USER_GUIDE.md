@@ -78,36 +78,63 @@ You tell Proxion what to swap using **configs**. A config is a list of rules lik
 
 ### Option 1: use a config someone shared
 
-1. Click **Open config…** on the **Replacer** tab and pick the `.json` file.
-   You can also drag the file onto `Proxion.exe`.
-2. Proxion copies it in and turns it on. You'll see its rules in the list.
+1. Click **Import config…** on the **Replacer** tab and pick the `.json` file. Configs made
+   for Fleasion work too. You can also drag the file onto `Proxion.exe`, or drop it into the
+   configs folder (**Open Configs**) and Proxion picks it up.
+2. Proxion copies it in and turns it on. You'll see its profiles in the list.
+   * If the config uses files from elsewhere on your PC, or downloads from the web, Proxion first
+     shows you exactly what it touches and asks before turning it on. Only say yes if you trust
+     where you got it.
 3. Make sure the proxy is running (green dot), then open Roblox and join the game.
 
-### Option 2: make your own rule
+### Option 2: use a scraped game list
+
+1. On the **Replacer** tab, click **Scraped games...**. It loads a community list of popular
+   games with their asset IDs already sorted into groups.
+2. Pick a game and click **Assets**. Expand the tree, select a group (for example a gun's sounds)
+   and click **IDs to Replace**. The IDs land in the **Asset IDs** box.
+3. Fill in **Replace With** and click **Add New**.
+
+### Option 3: make your own profile
 
 1. Start the proxy, open Roblox and join the game you want to change.
 2. Go to the **Asset log** tab. Everything the game loads shows up here with its ID and type.
-   * Tip: type `Audio` or `Image` in the filter box to narrow it down.
-3. Click the asset you want to change, then **Use selected as target**.
-4. Back on **Replacer**, give the rule a name and choose what to replace it with:
-   * **Asset ID**: another Roblox asset's ID number.
-   * **File**: a file on your PC (PNG, OGG, MP3, mesh, font...). Click **…** to pick it.
-   * **URL**: a direct link to a file on the web.
-   * **Remove**: the asset just disappears.
-5. Click **Add new**.
-6. Leave the game, click **Clear cache** (or just rejoin), and join again to see the change.
+   * Tip: pick a **Type** (like *Audio / Video*) or type in **Search** to narrow it down.
+3. Right-click the asset you want to change and choose **Replace**. Its ID goes into the
+   **Asset IDs** box on the Replacer tab.
+   * Want every hat or every decal? Click **Asset Types** and tick the type instead.
+4. Give the profile a name (optional) and fill in **Replace With**. Proxion works out what you mean:
+   * **an asset ID** (a number): use another Roblox asset instead.
+   * **an `https://` link**: download the replacement from the web.
+   * **a file** on your PC (PNG, OGG, MP3, mesh, font...): click **Browse...** to pick it.
+   * **leave it empty**: the asset just disappears.
+5. Click **Add New** (or press Enter).
+6. Leave the game, click **Clear Cache**, and join again to see the change. If Roblox is still
+   open, Proxion offers to close it for you.
 
 ---
 
 ## 6. Using configs
 
-* **Editing** picks which config you're changing right now.
-* **Enabled** lets you turn on several configs at once. They all apply together.
+* **Editing** picks which config you're changing right now. The dot is green when that config is
+  turned on, red when it's off.
+* **Enabled** is a tick list: turn on as many configs as you want. They all apply together.
+  If two configs replace the same asset, the one turned on later wins.
 * **New / Duplicate / Rename / Delete** manage configs.
-* **Open Configs** opens the folder where configs live
-  (`%APPDATA%\Proxion\configs`). You can drop `.json` files there too.
+* **Open Configs** opens the folder where configs live (`%APPDATA%\Proxion\configs`).
+  Drop `.json` files there and Proxion picks them up.
 * **Export…** saves the current config so you can share it.
-* **Undo (Ctrl+Z)** takes back your last change.
+
+### Working with profiles
+
+* **Right-click** a profile to enable or disable it, rename it, edit its asset IDs or replacement,
+  put it in a group, or delete it. Select several (Ctrl or Shift + click) to do them all at once.
+* **Groups** keep big configs tidy. Turning a group off turns off everything in it.
+* **Drag** profiles to reorder them, or drop one on a group to move it in.
+* **Load Selected** copies a profile into the boxes. Change it, then click **Update Selected**.
+* Click a column title to **sort** (click again to reverse, a third time to go back).
+* **Undo (Ctrl+Z)** and **Redo (Ctrl+Y)** take back changes (up to 50).
+* **Delete** removes the selected profiles. **?** shows all the keybinds.
 
 ---
 
