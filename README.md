@@ -33,6 +33,30 @@ Proxion builds into one `Proxion.exe`, no Python needed to run it. Two ways to g
 Windows SmartScreen may warn the first time because the exe isn't code signed. Click
 *More info* then *Run anyway*.
 
+**New to this? Read the step by step [user guide](docs/USER_GUIDE.md)**, or open the **Help** tab
+inside Proxion: it walks you through setup with a button for each step.
+
+## Features
+
+* **Replacer** laid out like Fleasion: Editing and Enabled config menus, a profile table with
+  status, mode, ID counts and replacement, right-click actions, groups, drag to reorder, sorting,
+  Undo/Redo (Ctrl+Z / Ctrl+Y), **Asset Types** picker, **Load Selected / Update Selected**.
+* **Replace With** works out what you mean: asset ID, `https://` link, local file, or empty to remove.
+* **Scraped games**: browse the community game asset lists (Fleasion's list) and send IDs into a profile.
+* **Asset log**: every asset Roblox loads, with search, type filter, and right-click
+  **Replace / Replace with**.
+* **Configs**: Fleasion compatible, any number turned on at once, import, export, and the configs
+  folder is watched for files you drop in.
+* **Clear Cache** clears the same Roblox cache files as Fleasion, and offers to close Roblox first.
+* **Help tab**, **?** buttons and a first run welcome.
+
+### Not included, on purpose
+
+Fleasion also has a Subplace Joiner, reserved server rejoin, an account manager that stores login
+cookies, a username spoofer and a full traffic editor. Proxion leaves those out: they get around
+games' access rules, handle your login cookie, or decrypt all of Roblox's traffic, which is a lot
+of risk for a cosmetic tool.
+
 ## Quick start
 
 1. Open `Proxion.exe` (or `run.bat` if you're running from source).

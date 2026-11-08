@@ -1,4 +1,7 @@
-"""Proxion desktop window (tkinter, ships with Python)."""
+"""Proxion desktop window (tkinter, ships with Python).
+
+Tabs: Replacer (configs and profiles, laid out like Fleasion), Asset log, Setup & tools, Help.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +12,20 @@ import queue
 import subprocess
 import sys
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import config as cfgmod
-from . import roblox
+from . import help_text, roblox, rules
+from .gui_dialogs import (
+    AssetTypesDialog,
+    EditIdsDialog,
+    EditReplacementDialog,
+    ScrapedGamesDialog,
+    apply_types,
+    browse_file,
+    selected_types,
+)
 from .proxy import ProxyRunner
 
 BG = "#16161d"
@@ -20,26 +33,46 @@ PANEL = "#1f1f29"
 FG = "#e6e6f0"
 ACCENT = "#7c5cff"
 MUTED = "#8a8aa0"
+GREEN = "#5be38a"
+RED = "#ff6b6b"
 MAX_LOG_ROWS = 5000  # assets kept in the Asset log tab
 MAX_OUTPUT_LINES = 1000  # lines kept in the proxy output box
+SORT_KEYS = {"#0": "name", "status": "status", "mode": "mode", "ids": "ids", "repl": "repl"}
+HEADINGS = {"#0": "Profile Name", "status": "Status", "mode": "Mode", "ids": "Asset IDs", "repl": "Replacement"}
 
 
-def _targets_text(rule: dict) -> str:
-    targets = rule.get("replace_ids") or []
-    return ", ".join(map(str, targets if isinstance(targets, list) else [targets]))
+def _short(text: str, limit: int = 60) -> str:
+    """Shorten a long path in the middle so both ends stay readable."""
+    return text if len(text) <= limit else text[: limit // 2 - 1] + "…" + text[-(limit // 2) :]
+
+
+def _iid(path: tuple) -> str:
+    return "/".join(map(str, path))
+
+
+def _path(iid: str) -> tuple:
+    return tuple(int(x) for x in iid.split("/"))
 
 
 class App(tk.Tk):
+    panel, fg = PANEL, FG  # used by dialogs
+
     def __init__(self) -> None:
         super().__init__()
         self.title("Proxion")
-        self.geometry("1000x660")
-        self.minsize(760, 480)
+        self.geometry("1060x720")
+        self.minsize(860, 560)
         self.configure(bg=BG)
 
         self.cfg = cfgmod.load_settings()
         self.current = self.cfg.last_config
         self.data = cfgmod.empty_config()
+        self.undo = rules.UndoStack()
+        self.sort: tuple[str, bool] | None = None
+        self._disk_stamp = None
+        self._configs_stamp: tuple = ()
+        self._drag: dict | None = None
+        self._enabled_vars: dict[str, tk.BooleanVar] = {}
         self.out_q: queue.Queue[str] = queue.Queue()
         self.runner = ProxyRunner(on_output=self.out_q.put)
         self.log_pos = 0
@@ -48,44 +81,53 @@ class App(tk.Tk):
         self._style()
         self._build()
         self._switch_config(self.current)
+        self._bind_keys()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(500, self._tick)
+        if not self.cfg.seen_welcome:
+            self.after(400, self._welcome)
 
-    # ---- look -----------------------------------------------------------
+    # ================================================================ look
     def _style(self) -> None:
         s = ttk.Style(self)
         s.theme_use("clam")
-        s.configure(".", background=BG, foreground=FG, fieldbackground=PANEL, bordercolor=PANEL)
+        s.configure(".", background=BG, foreground=FG, fieldbackground=PANEL, bordercolor="#2c2c3a")
         s.configure("TNotebook", background=BG, borderwidth=0)
         s.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(14, 6))
         s.map("TNotebook.Tab", background=[("selected", ACCENT)], foreground=[("selected", "white")])
-        s.configure("TButton", background=PANEL, foreground=FG, padding=(10, 5), borderwidth=0)
-        s.map("TButton", background=[("active", "#2c2c3a")])
+        s.configure("TButton", background=PANEL, foreground=FG, padding=(10, 4), borderwidth=0)
+        s.map("TButton", background=[("active", "#2c2c3a"), ("disabled", BG)], foreground=[("disabled", MUTED)])
         s.configure("Accent.TButton", background=ACCENT, foreground="white")
         s.map("Accent.TButton", background=[("active", "#6a4ae8")])
+        s.configure("TMenubutton", background=PANEL, foreground=FG, padding=(10, 4), arrowcolor=FG)
+        s.map("TMenubutton", background=[("active", "#2c2c3a")])
         s.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG, rowheight=24, borderwidth=0)
         s.configure("Treeview.Heading", background=BG, foreground=MUTED, borderwidth=0)
         s.map("Treeview", background=[("selected", ACCENT)])
         s.configure("TLabel", background=BG, foreground=FG)
         s.configure("Muted.TLabel", foreground=MUTED)
+        s.configure("Bold.TLabel", font=("Segoe UI", 10, "bold"))
+        s.configure("Title.TLabel", font=("Segoe UI", 12, "bold"))
+        s.configure("TLabelframe", background=BG, bordercolor="#2c2c3a")
+        s.configure("TLabelframe.Label", background=BG, foreground=FG, font=("Segoe UI", 10, "bold"))
         s.configure("TEntry", foreground=FG, insertcolor=FG)
         s.configure("TCheckbutton", background=BG, foreground=FG)
+        s.configure("Bold.TCheckbutton", background=BG, foreground=FG, font=("Segoe UI", 10, "bold"))
         s.configure("TRadiobutton", background=BG, foreground=FG)
         s.configure("TFrame", background=BG)
-        s.configure("Small.TButton", padding=(8, 2))
-        s.configure("TCombobox", fieldbackground=PANEL, background=PANEL, foreground=FG, arrowcolor=FG)
-        s.map(
-            "TCombobox",
-            fieldbackground=[("readonly", PANEL)],
-            foreground=[("readonly", FG)],
-            selectbackground=[("readonly", PANEL)],
-            selectforeground=[("readonly", FG)],
+        s.configure(
+            "Vertical.TScrollbar", background=PANEL, troughcolor=BG, bordercolor=BG, arrowcolor=MUTED, gripcount=0
         )
+        s.map("Vertical.TScrollbar", background=[("active", "#2c2c3a")])
+        s.configure("TCombobox", fieldbackground=PANEL, background=PANEL, foreground=FG, arrowcolor=FG)
+        s.map("TCombobox", fieldbackground=[("readonly", PANEL)], foreground=[("readonly", FG)])
         self.option_add("*TCombobox*Listbox.background", PANEL)
         self.option_add("*TCombobox*Listbox.foreground", FG)
-        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        self.option_add("*Menu.background", PANEL)
+        self.option_add("*Menu.foreground", FG)
+        self.option_add("*Menu.activeBackground", ACCENT)
+        self.option_add("*Menu.selectColor", FG)
 
-    # ---- layout ---------------------------------------------------------
     def _build(self) -> None:
         top = ttk.Frame(self, padding=(14, 10))
         top.pack(fill="x")
@@ -93,202 +135,206 @@ class App(tk.Tk):
         tk.Label(top, text="  Roblox asset replacer", bg=BG, fg=MUTED, font=("Segoe UI", 10)).pack(side="left")
         self.toggle_btn = ttk.Button(top, text="Start proxy", style="Accent.TButton", command=self._toggle)
         self.toggle_btn.pack(side="right")
-        self.status = tk.Label(top, text="● stopped", bg=BG, fg="#ff6b6b", font=("Segoe UI", 10))
+        self.status = tk.Label(top, text="● stopped", bg=BG, fg=RED, font=("Segoe UI", 10))
         self.status.pack(side="right", padx=12)
 
-        nb = self.nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        nb.add(self._rules_tab(nb), text="Replacements")
-        nb.add(self._log_tab(nb), text="Asset log")
-        nb.add(self._tools_tab(nb), text="Setup & tools")
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.tab_replacer = self._replacer_tab(self.nb)
+        self.tab_log = self._log_tab(self.nb)
+        self.tab_tools = self._tools_tab(self.nb)
+        self.tab_help = self._help_tab(self.nb)
+        self.nb.add(self.tab_replacer, text="Replacer")
+        self.nb.add(self.tab_log, text="Asset log")
+        self.nb.add(self.tab_tools, text="Setup & tools")
+        self.nb.add(self.tab_help, text="Help")
 
-    def _rules_tab(self, parent) -> ttk.Frame:
+    # ================================================================ Replacer tab
+    def _replacer_tab(self, parent) -> ttk.Frame:
         f = ttk.Frame(parent, padding=8)
 
-        # config bar: pick which config to edit, turn it on/off, manage files
-        bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(0, 4))
-        ttk.Label(bar, text="Config").pack(side="left")
-        self.v_config = tk.StringVar()
-        self.config_cb = ttk.Combobox(bar, textvariable=self.v_config, state="readonly", width=26)
-        self.config_cb.pack(side="left", padx=6)
-        self.config_cb.bind("<<ComboboxSelected>>", lambda e: self._switch_config(self.v_config.get()))
-        self.v_cfg_on = tk.BooleanVar()
-        ttk.Checkbutton(bar, text="Turned on", variable=self.v_cfg_on, command=self._toggle_config).pack(
-            side="left", padx=4
-        )
-        ttk.Button(bar, text="Folder", command=self._open_folder).pack(side="right", padx=2)
-        ttk.Button(bar, text="Export…", command=self._export).pack(side="right", padx=2)
-        ttk.Button(bar, text="Open config…", style="Accent.TButton", command=self._open_config).pack(
-            side="right", padx=2
-        )
-
-        bar2 = ttk.Frame(f)
-        bar2.pack(fill="x", pady=(0, 6))
+        conf = ttk.Labelframe(f, text="Configuration", padding=8)
+        conf.pack(fill="x")
+        ttk.Label(conf, text="Editing:").pack(side="left")
+        self.edit_dot = tk.Label(conf, text="●", bg=BG, fg=GREEN, font=("Segoe UI", 11))
+        self.edit_dot.pack(side="left", padx=(6, 0))
+        self.edit_mb = ttk.Menubutton(conf, width=20)
+        self.edit_menu = tk.Menu(self.edit_mb, tearoff=False, postcommand=self._fill_edit_menu)
+        self.edit_mb["menu"] = self.edit_menu
+        self.edit_mb.pack(side="left", padx=(2, 14))
+        ttk.Label(conf, text="Enabled:").pack(side="left")
+        self.enabled_mb = ttk.Menubutton(conf, width=20)
+        self.enabled_menu = tk.Menu(self.enabled_mb, tearoff=False, postcommand=self._fill_enabled_menu)
+        self.enabled_mb["menu"] = self.enabled_menu
+        self.enabled_mb.pack(side="left", padx=(6, 14))
         for text, cmd in (
             ("New", self._new_config),
             ("Duplicate", self._dup_config),
             ("Rename", self._rename_config),
             ("Delete", self._del_config),
         ):
-            ttk.Button(bar2, text=text, style="Small.TButton", command=cmd).pack(side="left", padx=(0, 4))
-        self.active_lbl = ttk.Label(bar2, style="Muted.TLabel")
-        self.active_lbl.pack(side="left", padx=10)
+            ttk.Button(conf, text=text, width=len(text) + 2, command=cmd).pack(side="left", padx=2)
 
-        body = ttk.Frame(f)
-        body.pack(fill="both", expand=True)
-        cols = ("on", "targets", "mode", "with")
-        self.rules_tv = ttk.Treeview(body, columns=cols, show="tree headings", selectmode="browse")
-        self.rules_tv.heading("#0", text="Name")
-        self.rules_tv.column("#0", width=170)
-        for c, w in zip(cols, (30, 150, 55, 150), strict=True):
-            self.rules_tv.heading(c, text={"on": "", "with": "Replacement"}.get(c, c.title()))
-            self.rules_tv.column(c, width=w, anchor="w")
-        self.rules_tv.bind("<<TreeviewSelect>>", lambda e: self._load_selected())
-        self.rules_tv.bind("<Double-1>", lambda e: self._toggle_selected())
+        head = ttk.Frame(f)
+        head.pack(fill="x", pady=(8, 2))
+        ttk.Label(head, text="Replacement Profiles:", style="Bold.TLabel").pack(side="left", anchor="s")
+        ttk.Button(head, text="Export…", command=self._export).pack(side="right", padx=2)
+        ttk.Button(head, text="Import config…", style="Accent.TButton", command=self._open_config).pack(
+            side="right", padx=2
+        )
+        table = ttk.Frame(f)
+        table.pack(fill="both", expand=True)
+        cols = ("status", "mode", "ids", "repl")
+        self.tv = ttk.Treeview(table, columns=cols, show="tree headings", selectmode="extended")
+        self.tv.heading("#0", text=HEADINGS["#0"], command=lambda: self._sort_by("#0"))
+        self.tv.column("#0", width=300, minwidth=160)
+        for c, w in (("status", 60), ("mode", 70), ("ids", 90), ("repl", 340)):
+            self.tv.heading(c, text=HEADINGS[c], command=lambda c=c: self._sort_by(c))
+            self.tv.column(c, width=w, minwidth=50, anchor="w", stretch=c == "repl")
+        self.tv.tag_configure("off", foreground=MUTED)
+        self.tv.tag_configure("group", font=("Segoe UI", 10, "bold"))
+        sb = ttk.Scrollbar(table, orient="vertical", command=self.tv.yview)
+        self.tv.configure(yscrollcommand=sb.set)
+        self.tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tv.bind("<Button-3>", self._context_menu)
+        self.tv.bind("<Button-2>", self._context_menu)  # macOS right click
+        self.tv.bind("<Double-1>", lambda e: self._load_selected())
+        self.tv.bind("<ButtonPress-1>", self._drag_start, add="+")
+        self.tv.bind("<B1-Motion>", self._drag_motion, add="+")
+        self.tv.bind("<ButtonRelease-1>", self._drag_end, add="+")
+        self.tv.bind("<<TreeviewOpen>>", lambda e: self._remember_open(True))
+        self.tv.bind("<<TreeviewClose>>", lambda e: self._remember_open(False))
+        self.empty_hint = tk.Label(
+            self.tv,
+            text="No profiles yet. Fill in the boxes below and click Add New,\n"
+            "or click Import config… to open one someone shared.",
+            bg=PANEL,
+            fg=MUTED,
+            justify="center",
+        )
 
-        ed = ttk.Frame(body, padding=(12, 0, 0, 0))
-        ed.pack(side="right", fill="y")
-        self.rules_tv.pack(side="left", fill="both", expand=True)
-        self.v_name = tk.StringVar()
-        self.v_targets = tk.StringVar()
-        self.v_mode = tk.StringVar(value=cfgmod.MODE_ID)
-        self.v_repl = tk.StringVar()
-        self.v_enabled = tk.BooleanVar(value=True)
-
-        ttk.Label(ed, text="Name").pack(anchor="w")
-        ttk.Entry(ed, textvariable=self.v_name, width=34).pack(fill="x", pady=(0, 8))
-        ttk.Label(ed, text="Replace (asset IDs, or types like Hat, Decal)").pack(anchor="w")
-        ttk.Entry(ed, textvariable=self.v_targets, width=34).pack(fill="x", pady=(0, 8))
-        ttk.Label(ed, text="Replace with").pack(anchor="w")
-        modes = ttk.Frame(ed)
-        modes.pack(anchor="w", pady=(0, 4))
-        for label, val in (
-            ("Asset ID", cfgmod.MODE_ID),
-            ("File", cfgmod.MODE_LOCAL),
-            ("URL", cfgmod.MODE_CDN),
-            ("Remove", cfgmod.MODE_REMOVE),
-        ):
-            ttk.Radiobutton(modes, text=label, value=val, variable=self.v_mode, command=self._mode_changed).pack(
-                side="left", padx=(0, 6)
-            )
-        row = ttk.Frame(ed)
-        row.pack(fill="x", pady=(0, 8))
-        self.repl_entry = ttk.Entry(row, textvariable=self.v_repl)
-        self.repl_entry.pack(side="left", fill="x", expand=True)
-        self.browse_btn = ttk.Button(row, text="…", width=3, command=self._browse)
-        self.browse_btn.pack(side="left", padx=(4, 0))
-        ttk.Checkbutton(ed, text="Enabled", variable=self.v_enabled).pack(anchor="w", pady=(0, 10))
-
-        ttk.Button(ed, text="Add rule", style="Accent.TButton", command=self._add_rule).pack(fill="x", pady=2)
-        ttk.Button(ed, text="Update selected", command=self._update_rule).pack(fill="x", pady=2)
-        ttk.Button(ed, text="Delete selected", command=self._delete_rule).pack(fill="x", pady=2)
-        ttk.Button(ed, text="New group", command=self._add_group).pack(fill="x", pady=2)
+        form = ttk.Labelframe(f, text="Add/Edit Profile", padding=8)
+        form.pack(fill="x", pady=(8, 0))
+        form.columnconfigure(1, weight=1)
+        self.v_name, self.v_ids, self.v_repl = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        entries = []
+        ttk.Label(form, text="Profile Name:").grid(row=0, column=0, sticky="w", pady=2)
+        entries.append(ttk.Entry(form, textvariable=self.v_name))
+        entries[-1].grid(row=0, column=1, columnspan=2, sticky="ew", pady=2)
+        ttk.Label(form, text="Asset IDs:").grid(row=1, column=0, sticky="w", pady=2)
+        entries.append(ttk.Entry(form, textvariable=self.v_ids))
+        entries[-1].grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Button(form, text="Asset Types", command=self._asset_types).grid(row=1, column=2, sticky="ew", padx=(6, 0))
+        ttk.Label(form, text="Replace With:").grid(row=2, column=0, sticky="w", pady=2)
+        entries.append(ttk.Entry(form, textvariable=self.v_repl))
+        entries[-1].grid(row=2, column=1, sticky="ew", pady=2)
+        ttk.Button(form, text="Browse...", command=self._browse).grid(row=2, column=2, sticky="ew", padx=(6, 0))
         ttk.Label(
-            ed,
-            text="Select a group first to add rules into it.\nDouble click turns a rule on or off.\n"
-            "Clear the cache or rejoin so Roblox\ndownloads the assets again.",
+            form,
+            text="Replace With: an asset ID, an https:// link, a file, or leave it empty to remove the asset.",
             style="Muted.TLabel",
-            justify="left",
-        ).pack(anchor="w", pady=(12, 0))
-        self._mode_changed()
+        ).grid(row=3, column=1, sticky="w")
+        for e in entries:
+            e.bind("<Return>", lambda ev: self._add_profile())
+        btns = ttk.Frame(form)
+        btns.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        ttk.Button(btns, text="Add New", style="Accent.TButton", command=self._add_profile).pack(side="left")
+        ttk.Button(btns, text="Load Selected", command=self._load_selected).pack(side="left", padx=4)
+        ttk.Button(btns, text="Update Selected", command=self._update_profile).pack(side="left")
+        ttk.Button(btns, text="Scraped games...", command=self._scraped_games).pack(side="right")
+
+        bottom = ttk.Frame(f)
+        bottom.pack(fill="x", pady=(8, 0))
+        self.redo_btn = ttk.Button(bottom, text="Redo (Ctrl+Y)", command=self._redo)
+        self.redo_btn.pack(side="right", padx=2)
+        self.undo_btn = ttk.Button(bottom, text="Undo (Ctrl+Z)", command=self._undo)
+        self.undo_btn.pack(side="right", padx=2)
+        ttk.Button(bottom, text="Open Configs", command=self._open_folder).pack(side="right", padx=2)
+        ttk.Button(bottom, text="Clear Cache", command=self._clear_cache).pack(side="right", padx=2)
+        ttk.Button(bottom, text="?", width=3, command=lambda: self._info("Replacer", help_text.KEYBINDS)).pack(
+            side="right", padx=2
+        )
+        # packed last so it gets whatever room the buttons leave, and is clipped rather than pushing them off
+        self.path_lbl = ttk.Label(bottom, style="Muted.TLabel")
+        self.path_lbl.pack(side="left", fill="x", expand=True)
         return f
 
-    def _log_tab(self, parent) -> ttk.Frame:
-        f = ttk.Frame(parent, padding=8)
-        bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(0, 6))
-        self.v_filter = tk.StringVar()
-        ttk.Label(bar, text="Filter").pack(side="left")
-        e = ttk.Entry(bar, textvariable=self.v_filter, width=30)
-        e.pack(side="left", padx=6)
-        self.v_filter.trace_add("write", lambda *a: self._redraw_log())
-        ttk.Button(bar, text="Use selected as target", command=self._log_to_rule).pack(side="right")
-        ttk.Button(bar, text="Copy ID", command=self._copy_id).pack(side="right", padx=6)
-        ttk.Button(bar, text="Clear log", command=self._clear_log).pack(side="right")
+    def _bind_keys(self) -> None:
+        def on_replacer(fn):
+            def handler(event):
+                in_entry = isinstance(event.widget, tk.Entry | ttk.Entry | tk.Text)
+                if self.nb.select() == str(self.tab_replacer) and not in_entry:
+                    fn()
+                    return "break"
+                return None
 
-        cols = ("id", "type", "action", "replacement", "hits")
-        self.log_tv = ttk.Treeview(f, columns=cols, show="headings")
-        for c, w in zip(cols, (140, 120, 80, 260, 60), strict=True):
-            self.log_tv.heading(c, text=c.title())
-            self.log_tv.column(c, width=w, anchor="w")
-        self.log_tv.pack(fill="both", expand=True)
-        ttk.Label(
-            f,
-            text="Every asset Roblox loads while the proxy is on shows up here. Join a game to fill it.",
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(6, 0))
-        return f
+            return handler
 
-    def _tools_tab(self, parent) -> ttk.Frame:
-        f = ttk.Frame(parent, padding=14)
-        ttk.Label(f, text="Capture mode", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        self.v_pmode = tk.StringVar(value=self.cfg.proxy_mode)
-        ttk.Radiobutton(
-            f,
-            text="Local capture: only grabs Roblox's traffic, nothing else on your PC (recommended)",
-            value="local",
-            variable=self.v_pmode,
-            command=self._save_settings,
-        ).pack(anchor="w")
-        ttk.Radiobutton(
-            f,
-            text="Regular proxy on a port, this PC only (advanced, you route traffic to it yourself)",
-            value="regular",
-            variable=self.v_pmode,
-            command=self._save_settings,
-        ).pack(anchor="w")
-        row = ttk.Frame(f)
-        row.pack(anchor="w", pady=6)
-        ttk.Label(row, text="Process").pack(side="left")
-        self.v_proc = tk.StringVar(value=self.cfg.capture_process)
-        ttk.Entry(row, textvariable=self.v_proc, width=22).pack(side="left", padx=6)
-        ttk.Label(row, text="Port").pack(side="left", padx=(10, 0))
-        self.v_port = tk.StringVar(value=str(self.cfg.proxy_port))
-        ttk.Entry(row, textvariable=self.v_port, width=7).pack(side="left", padx=6)
-        ttk.Button(row, text="Save", command=self._save_settings).pack(side="left", padx=6)
+        self.bind_all("<Control-z>", on_replacer(self._undo))
+        self.bind_all("<Control-y>", on_replacer(self._redo))
+        self.tv.bind("<Delete>", lambda e: self._delete_selected())
+        self.tv.bind("<Control-a>", lambda e: (self.tv.selection_set(self._all_iids()), "break")[1])
 
-        ttk.Separator(f).pack(fill="x", pady=12)
-        ttk.Label(f, text="Roblox", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        btns = ttk.Frame(f)
-        btns.pack(anchor="w", pady=6)
-        ttk.Button(btns, text="Install certificate", command=self._install_cert).pack(side="left")
-        ttk.Button(btns, text="Remove certificate", command=self._uninstall_cert).pack(side="left", padx=6)
-        ttk.Button(btns, text="Clear Roblox cache", command=self._clear_cache).pack(side="left")
-
-        ttk.Separator(f).pack(fill="x", pady=12)
-        ttk.Label(f, text="Proxy output", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        self.out_txt = tk.Text(f, height=10, bg=PANEL, fg=MUTED, relief="flat", font=("Consolas", 9))
-        self.out_txt.pack(fill="both", expand=True, pady=(6, 0))
-        return f
-
-    # ---- configs -------------------------------------------------------
+    # ---------------------------------------------------------------- configs
     def _switch_config(self, name: str) -> None:
-        if name not in cfgmod.list_configs():
-            name = cfgmod.list_configs()[0]
+        names = cfgmod.list_configs()
+        if not names:  # every config was deleted outside Proxion
+            cfgmod.write_config("Default", cfgmod.empty_config())
+            names = ["Default"]
+        if name not in names:
+            name = names[0]
         self.current = name
         self.data = cfgmod.read_config(name)
+        self.undo.clear()
         self.cfg.last_config = name
         cfgmod.save_settings(self.cfg)
-        self._refresh_configs()
+        self._remember_disk()
+        self._refresh_all()
 
-    def _refresh_configs(self) -> None:
+    def _remember_disk(self) -> None:
+        f = cfgmod.config_file(self.current)
+        self._disk_stamp = f.stat().st_mtime_ns if f.exists() else None
+        self._configs_stamp = tuple(cfgmod.list_configs())
+
+    def _refresh_all(self) -> None:
         names = cfgmod.list_configs()
         self.cfg.enabled_configs = [n for n in self.cfg.enabled_configs if n in names]
-        self.config_cb.configure(values=names)
-        self.v_config.set(self.current)
-        self.v_cfg_on.set(self.current in self.cfg.enabled_configs)
-        on = ", ".join(self.cfg.enabled_configs) or "none (turn a config on so the proxy uses it)"
-        self.active_lbl.configure(text=f"Turned on: {on}")
+        on = self.current in self.cfg.enabled_configs
+        self.edit_mb.configure(text=self.current)
+        self.edit_dot.configure(fg=GREEN if on else RED)
+        en = self.cfg.enabled_configs
+        self.enabled_mb.configure(
+            text="No Configs Enabled" if not en else en[0] if len(en) == 1 else f"{len(en)} configs enabled"
+        )
+        self.path_lbl.configure(text=f"Configs: {_short(str(cfgmod.configs_dir()))}")
         self._refresh_rules()
 
-    def _toggle_config(self) -> None:
-        en = [n for n in self.cfg.enabled_configs if n != self.current]
-        if self.v_cfg_on.get():
-            en.append(self.current)
+    def _fill_edit_menu(self) -> None:
+        self.edit_menu.delete(0, "end")
+        for n in cfgmod.list_configs():
+            mark = "● " if n in self.cfg.enabled_configs else "○ "
+            self.edit_menu.add_command(label=mark + n, command=lambda n=n: self._switch_config(n))
+
+    def _fill_enabled_menu(self) -> None:
+        self.enabled_menu.delete(0, "end")
+        names = cfgmod.list_configs()
+        self.cfg.enabled_configs = [n for n in self.cfg.enabled_configs if n in names]
+        self._enabled_vars = {}
+        for n in names:
+            v = tk.BooleanVar(value=n in self.cfg.enabled_configs)
+            self._enabled_vars[n] = v
+            self.enabled_menu.add_checkbutton(label=n, variable=v, command=lambda n=n: self._set_enabled_config(n))
+
+    def _set_enabled_config(self, name: str, on: bool | None = None) -> None:
+        if on is None:
+            on = self._enabled_vars[name].get()
+        en = [n for n in self.cfg.enabled_configs if n != name]
+        if on:
+            en.append(name)
         self.cfg.enabled_configs = en
         cfgmod.save_settings(self.cfg)
-        self._refresh_configs()
+        self._refresh_all()
 
     def _ask_name(self, title: str, initial: str = "") -> str | None:
         name = simpledialog.askstring("Proxion", title, initialvalue=initial, parent=self)
@@ -303,7 +349,16 @@ class App(tk.Tk):
                 messagebox.showerror("Proxion", str(e))
 
     def _dup_config(self) -> None:
-        self._switch_config(cfgmod.duplicate_config(self.current))
+        name = self._ask_name("Name for the copy:", f"Copy of {self.current}")
+        if not name:
+            return
+        try:
+            new = cfgmod.create_config(name)
+        except (ValueError, FileExistsError) as e:
+            messagebox.showerror("Proxion", str(e))
+            return
+        cfgmod.write_config(new, cfgmod.read_config(self.current))
+        self._switch_config(new)
 
     def _rename_config(self) -> None:
         name = self._ask_name(f'Rename "{self.current}" to:', self.current)
@@ -316,7 +371,7 @@ class App(tk.Tk):
             self._switch_config(new)
 
     def _del_config(self) -> None:
-        if not messagebox.askyesno("Proxion", f'Delete the config "{self.current}"?'):
+        if not messagebox.askyesno("Proxion", f'Delete the config "{self.current}"? This can\'t be undone.'):
             return
         try:
             cfgmod.delete_config(self.current, self.cfg)
@@ -327,7 +382,7 @@ class App(tk.Tk):
 
     def _open_config(self) -> None:
         paths = filedialog.askopenfilenames(
-            title="Open config (Proxion or Fleasion)", filetypes=[("Configs", "*.json"), ("All files", "*.*")]
+            title="Import config (Proxion or Fleasion)", filetypes=[("Configs", "*.json"), ("All files", "*.*")]
         )
         if paths:
             self.open_files(paths)
@@ -363,7 +418,7 @@ class App(tk.Tk):
                 if compiled.skipped
                 else ""
             )
-            opened.append(f"{last}: {n} rule(s){note}{'' if turn_on else ' (left turned off)'}")
+            opened.append(f"{last}: {n} profile(s){note}{'' if turn_on else ' (left turned off)'}")
         if last:
             self._switch_config(last)
         msg = ""
@@ -381,230 +436,382 @@ class App(tk.Tk):
             cfgmod.export_config(self.current, p)
 
     def _open_folder(self) -> None:
-        d = str(cfgmod.configs_dir())
+        self._open_path(str(cfgmod.configs_dir()))
+
+    def _open_path(self, d: str) -> None:
         try:
             if sys.platform == "win32":
-                os.startfile(d)  # noqa: S606
+                os.startfile(d)  # noqa: S606 (our own folder)
             else:
                 subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", d])
         except OSError:
-            messagebox.showinfo("Proxion", f"Configs folder:\n{d}")
+            messagebox.showinfo("Proxion", f"Folder:\n{d}")
 
-    # ---- rules ---------------------------------------------------------
-    def _node(self, path: tuple) -> dict:
-        items = self.data["replacement_rules"]
-        node = None
-        for i in path:
-            node = items[i]
-            items = node.setdefault("children", []) if node.get("type") == "group" else []
-        return node
+    # ---------------------------------------------------------------- profiles table
+    @property
+    def rules(self) -> list:
+        return self.data["replacement_rules"]
 
-    def _parent_list(self, path: tuple) -> list:
-        return self._node(path[:-1]).setdefault("children", []) if len(path) > 1 else self.data["replacement_rules"]
+    def _all_iids(self) -> list[str]:
+        out: list[str] = []
+
+        def walk(i):
+            for c in self.tv.get_children(i):
+                out.append(c)
+                walk(c)
+
+        walk("")
+        return out
+
+    def _sort_key(self, node: dict):
+        col = SORT_KEYS[self.sort[0]] if self.sort else None
+        status, mode, ids, repl = rules.row_values(node)
+        if col == "name":
+            return str(node.get("name", "")).lower()
+        if col == "ids":
+            first = ids.split()[0]
+            return int(first) if first.isdigit() else 0
+        return {"status": status, "mode": mode, "repl": repl.lower()}[col]
 
     def _refresh_rules(self) -> None:
-        tv = self.rules_tv
-        tv.delete(*tv.get_children())
+        sel = set(self.tv.selection())
+        self.tv.delete(*self.tv.get_children())
 
         def add(parent_iid: str, items: list, path: tuple) -> None:
-            for i, r in enumerate(items):
-                if not isinstance(r, dict):
-                    continue
-                p = path + (i,)
-                iid = "/".join(map(str, p))
-                on = "✔" if r.get("enabled", True) is not False else "✖"
-                if r.get("type") == "group":
-                    tv.insert(
-                        parent_iid,
-                        "end",
-                        iid=iid,
-                        text=str(r.get("name", "Group")),
-                        values=(on, "", "group", ""),
-                        open=r.get("expanded", True),
-                    )
-                    add(iid, r.get("children") or [], p)
-                    continue
-                mode = cfgmod.rule_mode(r)
-                kind, value = cfgmod.rule_action(r)
-                shown = (
-                    f"(ignored: {value})"
-                    if kind == cfgmod.INVALID
-                    else "(removed)"
-                    if kind == cfgmod.MODE_REMOVE
-                    else {
-                        cfgmod.MODE_ID: r.get("with_id"),
-                        cfgmod.MODE_LOCAL: r.get("local_path"),
-                        cfgmod.MODE_CDN: r.get("cdn_url"),
-                    }.get(mode, "")
+            entries = [(i, n) for i, n in enumerate(items) if isinstance(n, dict)]
+            if self.sort:
+                entries.sort(key=lambda e: self._sort_key(e[1]), reverse=self.sort[1])
+            for i, node in entries:
+                p = (*path, i)
+                status, mode, ids, repl = rules.row_values(node)
+                tags = (["off"] if status == "Off" else []) + (["group"] if rules.is_group(node) else [])
+                default = "Group" if rules.is_group(node) else "Profile"
+                self.tv.insert(
+                    parent_iid,
+                    "end",
+                    iid=_iid(p),
+                    text=str(node.get("name") or default),
+                    values=(status, mode, ids, repl),
+                    open=node.get("expanded", True),
+                    tags=tags,
                 )
-                targets = _targets_text(r)
-                tv.insert(
-                    parent_iid, "end", iid=iid, text=str(r.get("name", "Rule")), values=(on, targets, mode, shown)
-                )
+                if rules.is_group(node):
+                    add(_iid(p), node.get("children") or [], p)
 
-        add("", self.data["replacement_rules"], ())
+        add("", self.rules, ())
+        keep = [i for i in sel if self.tv.exists(i)]
+        if keep:
+            self.tv.selection_set(keep)
+        if self.tv.get_children():
+            self.empty_hint.place_forget()
+        else:
+            self.empty_hint.place(relx=0.5, rely=0.45, anchor="center")
+        self.undo_btn.state(["!disabled"] if self.undo.can_undo else ["disabled"])
+        self.redo_btn.state(["!disabled"] if self.undo.can_redo else ["disabled"])
 
-    def _selected_path(self) -> tuple | None:
-        sel = self.rules_tv.selection()
-        return tuple(int(x) for x in sel[0].split("/")) if sel else None
+    def _sort_by(self, col: str) -> None:
+        if self.sort and self.sort[0] == col:
+            self.sort = None if self.sort[1] else (col, True)  # ascending, descending, then file order
+        else:
+            self.sort = (col, False)
+        arrow = {col: " ▼" if self.sort[1] else " ▲"} if self.sort else {}
+        for c, t in HEADINGS.items():
+            self.tv.heading(c, text=t + arrow.get(c, ""))
+        self._refresh_rules()
 
-    def _form_rule(self) -> dict | None:
-        raw = [t for t in self.v_targets.get().replace(",", " ").split() if t]
-        if not raw:
+    def _selected_paths(self) -> list[tuple]:
+        return [_path(i) for i in self.tv.selection()]
+
+    def _change(self, fn, select: list[tuple] | None = None):
+        """Every edit goes through here: snapshot for undo, apply, save, redraw."""
+        self.undo.push(self.rules)
+        result = fn()
+        self._save_current()
+        self._refresh_rules()
+        if select:
+            iids = [_iid(p) for p in select if self.tv.exists(_iid(p))]
+            if iids:
+                self.tv.selection_set(iids)
+                self.tv.see(iids[0])
+        return result
+
+    def _save_current(self) -> None:
+        cfgmod.write_config(self.current, self.data)
+        self._remember_disk()
+
+    def _undo(self) -> None:
+        prev = self.undo.undo(self.rules)
+        if prev is not None:
+            self.data["replacement_rules"] = prev
+            self._save_current()
+            self._refresh_all()
+
+    def _redo(self) -> None:
+        nxt = self.undo.redo(self.rules)
+        if nxt is not None:
+            self.data["replacement_rules"] = nxt
+            self._save_current()
+            self._refresh_all()
+
+    def _remember_open(self, is_open: bool) -> None:
+        iid = self.tv.focus()
+        if iid:
+            node = rules.node_at(self.rules, _path(iid))
+            if rules.is_group(node):
+                node["expanded"] = is_open
+                self._save_current()  # UI state only, not an undo step
+
+    # ---------------------------------------------------------------- add / edit form
+    def _read_form(self) -> tuple[str, list, str, object] | None:
+        targets = rules.split_targets(self.v_ids.get())
+        if not targets:
             messagebox.showerror("Proxion", "Add at least one asset ID (or a type like Hat) to replace.")
             return None
-        targets = [cfgmod.as_asset_id(t) or t for t in raw]
         bad = [str(t) for t in targets if cfgmod.parse_target(t) is None]
         if bad and not messagebox.askyesno(
             "Proxion",
-            "Proxion can't use these targets: "
-            + ", ".join(bad)
+            "Proxion can't use these entries: "
+            + ", ".join(bad[:20])
             + "\n(IDs 1 to 80 and unknown names are ignored.)\n\nKeep them anyway?",
         ):
             return None
-        mode = self.v_mode.get()
-        repl = self.v_repl.get().strip()
-        if mode == cfgmod.MODE_ID and cfgmod.as_asset_id(repl) is None:
-            messagebox.showerror("Proxion", "Replacement must be a numeric asset ID.")
+        try:
+            mode, value = rules.parse_replacement(self.v_repl.get())
+        except ValueError as e:
+            messagebox.showerror("Proxion", str(e))
             return None
-        if mode in (cfgmod.MODE_LOCAL, cfgmod.MODE_CDN) and not repl:
-            messagebox.showerror("Proxion", "Pick a file or enter a URL for the replacement.")
-            return None
-        problem = (
-            cfgmod.local_path_problem(repl)
-            if mode == cfgmod.MODE_LOCAL
-            else cfgmod.url_problem(repl)
-            if mode == cfgmod.MODE_CDN
-            else None
-        )
-        if problem:
-            messagebox.showerror("Proxion", f"Can't use that replacement: {problem}.")
-            return None
-        rule = {
-            "name": self.v_name.get().strip() or "Rule",
-            "replace_ids": targets,
-            "mode": mode,
-            "enabled": self.v_enabled.get(),
-        }
-        if mode == cfgmod.MODE_ID:
-            rule["with_id"] = int(repl)
-        elif mode == cfgmod.MODE_LOCAL:
-            rule["local_path"] = repl
-        elif mode == cfgmod.MODE_CDN:
-            rule["cdn_url"] = repl
-        return rule
+        return self.v_name.get().strip(), targets, mode, value
+
+    def _insert_point(self) -> tuple[list, tuple]:
+        """New profiles go into the selected group, else next to the selection, else at the end."""
+        paths = self._selected_paths()
+        if paths:
+            p = paths[0]
+            node = rules.node_at(self.rules, p)
+            if rules.is_group(node):
+                return node.setdefault("children", []), p
+            return rules.children_of(self.rules, p[:-1]), p[:-1]
+        return self.rules, ()
+
+    def _add_profile(self) -> None:
+        form = self._read_form()
+        if not form:
+            return
+        name, targets, mode, value = form
+        items, parent = self._insert_point()
+        name = name or f"Profile {len(rules.leaf_rules(self.rules)) + 1}"
+        self._change(lambda: items.append(rules.make_rule(name, targets, mode, value)), [(*parent, len(items))])
+        for v in (self.v_name, self.v_ids, self.v_repl):
+            v.set("")
 
     def _load_selected(self) -> None:
-        path = self._selected_path()
-        if path is None:
+        paths = self._selected_paths()
+        if not paths:
             return
-        r = self._node(path)
-        self.v_name.set(str(r.get("name", "")))
-        self.v_enabled.set(r.get("enabled", True) is not False)
-        if r.get("type") == "group":
+        node = rules.node_at(self.rules, paths[0])
+        if rules.is_group(node):
             return
-        self.v_targets.set(_targets_text(r))
-        mode = cfgmod.rule_mode(r)
-        self.v_mode.set(mode)
-        self.v_repl.set(
-            str(
-                {
-                    cfgmod.MODE_ID: r.get("with_id"),
-                    cfgmod.MODE_LOCAL: r.get("local_path"),
-                    cfgmod.MODE_CDN: r.get("cdn_url"),
-                }.get(mode)
-                or ""
-            )
+        self.v_name.set(str(node.get("name", "")))
+        self.v_ids.set(rules.join_targets(node.get("replace_ids") or []))
+        self.v_repl.set(rules.replacement_text(node))
+
+    def _update_profile(self) -> None:
+        paths = self._selected_paths()
+        if not paths:
+            messagebox.showinfo("Proxion", "Select a profile in the list first (Load Selected copies it here).")
+            return
+        node = rules.node_at(self.rules, paths[0])
+        if rules.is_group(node):
+            messagebox.showinfo("Proxion", "That's a group. Right-click it to rename it.")
+            return
+        form = self._read_form()
+        if form:
+            name, targets, mode, value = form
+            name = name or str(node.get("name", "Profile"))
+            self._change(lambda: rules.apply_fields(node, name, targets, mode, value), [paths[0]])
+
+    def _asset_types(self) -> None:
+        AssetTypesDialog(
+            self, selected_types(self.v_ids.get()), lambda t: self.v_ids.set(apply_types(self.v_ids.get(), t))
         )
-        self._mode_changed()
-
-    def _persist(self, select: tuple | None = None) -> None:
-        cfgmod.write_config(self.current, self.data)
-        self._refresh_rules()
-        if select is not None:
-            iid = "/".join(map(str, select))
-            if self.rules_tv.exists(iid):
-                self.rules_tv.selection_set(iid)
-                self.rules_tv.see(iid)
-
-    def _insert_target(self) -> tuple[list, tuple]:
-        """Where a new item goes: inside the selected group, else next to the selection."""
-        path = self._selected_path()
-        if path is not None and self._node(path).get("type") == "group":
-            return self._node(path).setdefault("children", []), path
-        if path is not None and len(path) > 1:
-            return self._parent_list(path), path[:-1]
-        return self.data["replacement_rules"], ()
-
-    def _add_rule(self) -> None:
-        r = self._form_rule()
-        if r:
-            items, base = self._insert_target()
-            items.append(r)
-            self._persist(base + (len(items) - 1,))
-
-    def _add_group(self) -> None:
-        name = self._ask_name("Group name:")
-        if name:
-            items, base = self._insert_target()
-            items.append({"type": "group", "name": name, "enabled": True, "expanded": True, "children": []})
-            self._persist(base + (len(items) - 1,))
-
-    def _update_rule(self) -> None:
-        path = self._selected_path()
-        if path is None:
-            return
-        node = self._node(path)
-        if node.get("type") == "group":
-            node["name"] = self.v_name.get().strip() or node.get("name", "Group")
-            node["enabled"] = self.v_enabled.get()
-            self._persist(path)
-            return
-        r = self._form_rule()
-        if r:
-            for k in ("with_id", "local_path", "cdn_url", "remove"):
-                node.pop(k, None)
-            node.update(r)  # keeps any extra keys Fleasion or other tools stored
-            self._persist(path)
-
-    def _delete_rule(self) -> None:
-        path = self._selected_path()
-        if path is None:
-            return
-        node = self._node(path)
-        if (
-            node.get("type") == "group"
-            and node.get("children")
-            and not messagebox.askyesno("Proxion", f'Delete the group "{node.get("name")}" and everything in it?')
-        ):
-            return
-        del self._parent_list(path)[path[-1]]
-        self._persist()
-
-    def _toggle_selected(self) -> None:
-        path = self._selected_path()
-        if path is not None:
-            node = self._node(path)
-            node["enabled"] = node.get("enabled", True) is False
-            self._persist(path)
-
-    def _mode_changed(self) -> None:
-        m = self.v_mode.get()
-        self.repl_entry.configure(state="disabled" if m == cfgmod.MODE_REMOVE else "normal")
-        self.browse_btn.configure(state="normal" if m == cfgmod.MODE_LOCAL else "disabled")
 
     def _browse(self) -> None:
-        p = filedialog.askopenfilename(
-            title="Replacement file",
-            filetypes=[
-                ("Common assets", "*.png *.jpg *.jpeg *.ogg *.mp3 *.mesh *.obj *.rbxm *.ktx"),
-                ("All files", "*.*"),
-            ],
-        )
+        p = browse_file(self)
         if p:
             self.v_repl.set(p)
 
-    # ---- asset log -----------------------------------------------------
+    def _scraped_games(self) -> None:
+        def add_ids(ids):
+            current = rules.split_targets(self.v_ids.get())
+            self.v_ids.set(rules.join_targets(current + [i for i in ids if i not in current]))
+
+        ScrapedGamesDialog(self, add_ids, self.v_repl.set)
+
+    # ---------------------------------------------------------------- right-click menu
+    def _context_menu(self, event) -> None:
+        row = self.tv.identify_row(event.y)
+        if row and row not in self.tv.selection():
+            self.tv.selection_set(row)
+        paths = self._selected_paths()
+        m = tk.Menu(self, tearoff=False)
+        if not paths:
+            m.add_command(label="Add a profile with the boxes below", state="disabled")
+        elif len(paths) > 1:
+            m.add_command(label="Enable Selected", command=lambda: self._set_on(paths, True))
+            m.add_command(label="Disable Selected", command=lambda: self._set_on(paths, False))
+            if len({p[:-1] for p in paths}) == 1:
+                m.add_command(label="Create Group", command=lambda: self._group(paths))
+            m.add_separator()
+            m.add_command(label="Delete Selected", command=self._delete_selected)
+        else:
+            p = paths[0]
+            node = rules.node_at(self.rules, p)
+            on = rules.is_on(node)
+            kind = "Group" if rules.is_group(node) else "Profile"
+            m.add_command(label=f"{'Disable' if on else 'Enable'} {kind}", command=lambda: self._set_on(paths, not on))
+            m.add_command(label=f"Rename {kind}", command=lambda: self._rename_node(p))
+            if kind == "Profile":
+                m.add_command(label="Edit Asset IDs", command=lambda: self._edit_ids(p))
+                m.add_command(label="Edit Replacement", command=lambda: self._edit_replacement(p))
+                m.add_command(label="Load into boxes", command=self._load_selected)
+                m.add_command(label="Create Group", command=lambda: self._group(paths))
+            m.add_separator()
+            m.add_command(label=f"Delete {kind}", command=self._delete_selected)
+        m.tk_popup(event.x_root, event.y_root)
+
+    def _set_on(self, paths, on: bool) -> None:
+        self._change(lambda: rules.set_enabled(self.rules, paths, on), paths)
+
+    def _group(self, paths) -> None:
+        if len({p[:-1] for p in paths}) != 1:
+            messagebox.showerror("Proxion", "Pick profiles from the same level to group them.")
+            return
+        name = self._ask_name("Group name:", "New Group")
+        if name:
+            new = self._change(lambda: rules.create_group(self.rules, paths, name))
+            if self.tv.exists(_iid(new)):
+                self.tv.selection_set(_iid(new))
+
+    def _rename_node(self, p) -> None:
+        node = rules.node_at(self.rules, p)
+        name = self._ask_name("New name:", str(node.get("name", "")))
+        if name:
+            self._change(lambda: node.__setitem__("name", name), [p])
+
+    def _edit_ids(self, p) -> None:
+        node = rules.node_at(self.rules, p)
+        targets = node.get("replace_ids") or []
+        EditIdsDialog(
+            self,
+            str(node.get("name", "Profile")),
+            targets if isinstance(targets, list) else [targets],
+            lambda t: self._change(lambda: node.__setitem__("replace_ids", t), [p]),
+        )
+
+    def _edit_replacement(self, p) -> None:
+        node = rules.node_at(self.rules, p)
+
+        def save(text: str) -> bool:
+            try:
+                mode, value = rules.parse_replacement(text)
+            except ValueError as e:
+                messagebox.showerror("Proxion", str(e))
+                return False
+            targets = node.get("replace_ids") or []
+            self._change(lambda: rules.apply_fields(node, str(node.get("name", "")), targets, mode, value), [p])
+            return True
+
+        EditReplacementDialog(self, str(node.get("name", "Profile")), rules.replacement_text(node), save)
+
+    def _delete_selected(self) -> None:
+        paths = self._selected_paths()
+        if not paths:
+            return
+        nodes = [rules.node_at(self.rules, p) for p in paths]
+        if any(rules.is_group(n) and n.get("children") for n in nodes) and not messagebox.askyesno(
+            "Proxion", "Delete the selected group(s) and everything inside them?"
+        ):
+            return
+        self._change(lambda: rules.remove_paths(self.rules, paths))
+
+    # ---------------------------------------------------------------- drag and drop
+    def _drag_start(self, event) -> None:
+        row = self.tv.identify_row(event.y)
+        self._drag = {"row": row, "y": event.y, "active": False} if row else None
+
+    def _drag_motion(self, event) -> None:
+        if not self._drag or self.sort:  # reordering a sorted view would be confusing
+            return
+        if not self._drag["active"] and abs(event.y - self._drag["y"]) > 6:
+            self._drag["active"] = True
+            self.tv.configure(cursor="fleur")
+
+    def _drag_end(self, event) -> None:
+        drag, self._drag = self._drag, None
+        self.tv.configure(cursor="")
+        if not drag or not drag["active"]:
+            return
+        src = _path(drag["row"])
+        target = self.tv.identify_row(event.y)
+        if not target:
+            dest_parent, index = (), len(self.rules)  # empty space: end of the top level
+        else:
+            tp = _path(target)
+            tnode = rules.node_at(self.rules, tp)
+            _x, y, _w, h = self.tv.bbox(target)
+            frac = (event.y - y) / max(h, 1)
+            if rules.is_group(tnode) and 0.25 < frac < 0.75:
+                dest_parent, index = tp, len(tnode.get("children") or [])
+            else:
+                dest_parent, index = tp[:-1], tp[-1] + (1 if frac >= 0.5 else 0)
+        if dest_parent[: len(src)] == src or (dest_parent == src[:-1] and index in (src[-1], src[-1] + 1)):
+            return  # into itself, or dropped where it already is
+        new = self._change(lambda: rules.move_node(self.rules, src, dest_parent, index))
+        if self.tv.exists(_iid(new)):
+            self.tv.selection_set(_iid(new))
+
+    # ================================================================ Asset log tab
+    def _log_tab(self, parent) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=8)
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, text="Search:").pack(side="left")
+        self.v_filter = tk.StringVar()
+        ttk.Entry(bar, textvariable=self.v_filter, width=26).pack(side="left", padx=6)
+        self.v_filter.trace_add("write", lambda *a: self._redraw_log())
+        ttk.Label(bar, text="Type:").pack(side="left", padx=(8, 0))
+        self.v_type = tk.StringVar(value="All Types")
+        cb = ttk.Combobox(
+            bar,
+            textvariable=self.v_type,
+            state="readonly",
+            width=18,
+            values=["All Types", *rules.ASSET_TYPE_CATEGORIES],
+        )
+        cb.pack(side="left", padx=6)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._redraw_log())
+        self.log_count = ttk.Label(bar, style="Muted.TLabel")
+        self.log_count.pack(side="left", padx=8)
+        ttk.Button(bar, text="?", width=3, command=lambda: self._info("Asset log", help_text.LOG_HELP)).pack(
+            side="right"
+        )
+        ttk.Button(bar, text="Clear log", command=self._clear_log).pack(side="right", padx=4)
+
+        cols = ("id", "type", "action", "replacement", "hits")
+        self.log_tv = ttk.Treeview(f, columns=cols, show="headings")
+        for c, w in zip(cols, (150, 130, 80, 280, 60), strict=True):
+            self.log_tv.heading(c, text={"id": "Asset ID"}.get(c, c.title()))
+            self.log_tv.column(c, width=w, anchor="w")
+        self.log_tv.pack(fill="both", expand=True)
+        self.log_tv.bind("<Button-3>", self._log_menu)
+        self.log_tv.bind("<Button-2>", self._log_menu)
+        ttk.Label(
+            f,
+            text="Every asset Roblox loads while the proxy is on shows up here. Right-click one to replace it.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(6, 0))
+        return f
+
     def _read_log(self) -> None:
         path = cfgmod.log_path()
         if not path.exists():
@@ -625,7 +832,8 @@ class App(tk.Tk):
             except ValueError:
                 continue
             aid = e.get("assetId")
-            cur = self.seen.setdefault(aid, {"type": "?", "hits": 0})
+            cur = self.seen.pop(aid, None) or {"type": "?", "hits": 0}
+            self.seen[aid] = cur  # move to the end: newest last
             if e.get("type") not in (None, "?"):
                 cur["type"] = e["type"]
             cur["action"] = e.get("action", "none")
@@ -637,12 +845,18 @@ class App(tk.Tk):
 
     def _redraw_log(self) -> None:
         flt = self.v_filter.get().lower().strip()
+        allowed = set(rules.ASSET_TYPE_CATEGORIES.get(self.v_type.get(), []))
         self.log_tv.delete(*self.log_tv.get_children())
+        shown = 0
         for aid, e in reversed(list(self.seen.items())):
+            if allowed and e["type"] not in allowed:
+                continue
             vals = (aid, e["type"], e.get("action", ""), e.get("replacement") or "", e["hits"])
             if flt and not any(flt in str(v).lower() for v in vals):
                 continue
             self.log_tv.insert("", "end", values=vals)
+            shown += 1
+        self.log_count.configure(text=f"{shown} of {len(self.seen)} assets")
 
     def _clear_log(self) -> None:
         self.seen.clear()
@@ -654,25 +868,102 @@ class App(tk.Tk):
     def _log_ids(self) -> list[str]:
         return [str(self.log_tv.item(i)["values"][0]) for i in self.log_tv.selection()]
 
-    def _copy_id(self) -> None:
-        ids = self._log_ids()
-        if ids:
-            self.clipboard_clear()
-            self.clipboard_append(", ".join(ids))
+    def _log_menu(self, event) -> None:
+        row = self.log_tv.identify_row(event.y)
+        if row and row not in self.log_tv.selection():
+            self.log_tv.selection_set(row)
+        ids = [i for i in self._log_ids() if cfgmod.as_asset_id(i) is not None]
+        if not ids:
+            return
+        m = tk.Menu(self, tearoff=False)
+        m.add_command(label=f"Replace ({len(ids)})", command=lambda: self._log_replace(ids))
+        m.add_command(label="Replace with", command=lambda: self._log_replace_with(ids[0]))
+        m.add_separator()
+        m.add_command(label="Copy Asset ID", command=lambda: self._copy(", ".join(ids)))
+        aid = cfgmod.as_asset_id(ids[0])
+        m.add_command(
+            label="Open asset page", command=lambda: webbrowser.open(f"https://create.roblox.com/store/asset/{aid}")
+        )
+        m.tk_popup(event.x_root, event.y_root)
 
-    def _log_to_rule(self) -> None:
-        ids = self._log_ids()
-        if ids:
-            self.v_targets.set(", ".join(ids))
-            self.rules_tv.selection_remove(self.rules_tv.selection())
-            self.nb.select(0)
+    def _log_replace(self, ids: list[str]) -> None:
+        current = rules.split_targets(self.v_ids.get())
+        new = [cfgmod.as_asset_id(i) for i in ids]
+        self.v_ids.set(rules.join_targets(current + [i for i in new if i not in current]))
+        self.nb.select(self.tab_replacer)
 
-    # ---- tools ---------------------------------------------------------
+    def _log_replace_with(self, aid: str) -> None:
+        self.v_repl.set(aid)
+        self.nb.select(self.tab_replacer)
+
+    def _copy(self, text: str) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(text)
+
+    # ================================================================ Setup & tools tab
+    def _tools_tab(self, parent) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=14)
+        head = ttk.Frame(f)
+        head.pack(fill="x")
+        ttk.Label(head, text="Capture mode", style="Title.TLabel").pack(side="left")
+        ttk.Button(head, text="?", width=3, command=lambda: self._info("Setup & tools", help_text.SETUP_HELP)).pack(
+            side="right"
+        )
+        self.v_pmode = tk.StringVar(value=self.cfg.proxy_mode)
+        ttk.Radiobutton(
+            f,
+            text="Local capture: only grabs Roblox's traffic, nothing else on your PC (recommended)",
+            value="local",
+            variable=self.v_pmode,
+            command=self._save_settings,
+        ).pack(anchor="w")
+        ttk.Radiobutton(
+            f,
+            text="Regular proxy on a port, this PC only (advanced, you route traffic to it yourself)",
+            value="regular",
+            variable=self.v_pmode,
+            command=self._save_settings,
+        ).pack(anchor="w")
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=6)
+        ttk.Label(row, text="Process").pack(side="left")
+        self.v_proc = tk.StringVar(value=self.cfg.capture_process)
+        ttk.Entry(row, textvariable=self.v_proc, width=22).pack(side="left", padx=6)
+        ttk.Label(row, text="Port").pack(side="left", padx=(10, 0))
+        self.v_port = tk.StringVar(value=str(self.cfg.proxy_port))
+        ttk.Entry(row, textvariable=self.v_port, width=7).pack(side="left", padx=6)
+        ttk.Button(row, text="Save", command=self._save_settings).pack(side="left", padx=6)
+        self.v_clear_start = tk.BooleanVar(value=self.cfg.clear_cache_on_start)
+        ttk.Checkbutton(
+            f,
+            text="Clear Roblox's cache when the proxy starts (only if Roblox is closed)",
+            variable=self.v_clear_start,
+            command=self._save_settings,
+        ).pack(anchor="w")
+
+        ttk.Separator(f).pack(fill="x", pady=12)
+        ttk.Label(f, text="Roblox", style="Title.TLabel").pack(anchor="w")
+        btns = ttk.Frame(f)
+        btns.pack(anchor="w", pady=6)
+        ttk.Button(btns, text="Install certificate", command=self._install_cert).pack(side="left")
+        ttk.Button(btns, text="Remove certificate", command=self._uninstall_cert).pack(side="left", padx=6)
+        ttk.Button(btns, text="Clear Roblox cache", command=self._clear_cache).pack(side="left")
+        ttk.Button(btns, text="Open Proxion folder", command=lambda: self._open_path(str(cfgmod.app_dir()))).pack(
+            side="left", padx=6
+        )
+
+        ttk.Separator(f).pack(fill="x", pady=12)
+        ttk.Label(f, text="Proxy output", style="Title.TLabel").pack(anchor="w")
+        self.out_txt = tk.Text(f, height=10, bg=PANEL, fg=MUTED, relief="flat", font=("Consolas", 9))
+        self.out_txt.pack(fill="both", expand=True, pady=(6, 0))
+        return f
+
     def _save_settings(self) -> None:
         self.cfg.proxy_mode = self.v_pmode.get()
         self.cfg.capture_process = self.v_proc.get().strip() or "RobloxPlayerBeta"
         if self.v_port.get().isdigit():
             self.cfg.proxy_port = int(self.v_port.get())
+        self.cfg.clear_cache_on_start = self.v_clear_start.get()
         cfgmod.save_settings(self.cfg)
 
     def _install_cert(self, quiet: bool = False) -> None:
@@ -705,20 +996,118 @@ class App(tk.Tk):
         messagebox.showinfo("Proxion", msg)
 
     def _clear_cache(self) -> None:
+        if roblox.is_running():
+            if not messagebox.askyesno(
+                "Proxion", "Roblox is open, so its cache is locked.\n\nClose Roblox now and clear the cache?"
+            ):
+                return
+            if not roblox.close_roblox() or roblox.is_running():
+                messagebox.showwarning("Proxion", "Couldn't close Roblox. Close it (and Roblox Studio) and try again.")
+                return
         try:
             removed = roblox.clear_cache()
         except RuntimeError as e:
             messagebox.showwarning("Proxion", str(e))
             return
-        messagebox.showinfo("Proxion", f"Cleared {len(removed)} cache location(s).")
+        messagebox.showinfo("Proxion", f"Cache cleared ({len(removed)} location(s)). Join your game again.")
 
-    # ---- proxy ---------------------------------------------------------
+    # ================================================================ Help tab
+    def _help_tab(self, parent) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=(14, 10))
+        canvas = tk.Canvas(f, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(f, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        def wheel(event):
+            if self.nb.select() == str(self.tab_help):
+                delta = -1 if (getattr(event, "delta", 0) > 0 or event.num == 4) else 1
+                canvas.yview_scroll(delta * 3, "units")
+
+        self.bind_all("<MouseWheel>", wheel, add="+")
+        self.bind_all("<Button-4>", wheel, add="+")
+        self.bind_all("<Button-5>", wheel, add="+")
+
+        ttk.Label(inner, text="Getting started", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(
+            inner,
+            text="Follow these steps in order. Each step has a button that does it for you.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 8))
+        actions = {
+            "install_cert": self._install_cert,
+            "start": lambda: None if self.runner.running else self._toggle(),
+            "import": self._open_config,
+            "replacer": lambda: self.nb.select(self.tab_replacer),
+            "scraped": lambda: (self.nb.select(self.tab_replacer), self._scraped_games()),
+            "log": lambda: self.nb.select(self.tab_log),
+            "clear_cache": self._clear_cache,
+        }
+        for n, (title, body, buttons) in enumerate(help_text.STEPS, 1):
+            box = ttk.Frame(inner, padding=(0, 4))
+            box.pack(fill="x")
+            tk.Label(box, text=str(n), bg=ACCENT, fg="white", width=3, font=("Segoe UI", 11, "bold")).pack(
+                side="left", anchor="n", padx=(0, 10)
+            )
+            col = ttk.Frame(box)
+            col.pack(side="left", fill="x", expand=True)
+            ttk.Label(col, text=title, style="Bold.TLabel").pack(anchor="w")
+            ttk.Label(col, text=body, wraplength=760, justify="left").pack(anchor="w")
+            if buttons:
+                row = ttk.Frame(col)
+                row.pack(anchor="w", pady=(4, 0))
+                for label, action in buttons:
+                    ttk.Button(row, text=label, command=actions[action]).pack(side="left", padx=(0, 6))
+
+        ttk.Separator(inner).pack(fill="x", pady=12)
+        ttk.Label(inner, text="Something not working?", style="Title.TLabel").pack(anchor="w", pady=(0, 4))
+        for title, body in help_text.TROUBLESHOOTING:
+            ttk.Label(inner, text=title, style="Bold.TLabel").pack(anchor="w", pady=(4, 0))
+            ttk.Label(inner, text=body, wraplength=780, justify="left").pack(anchor="w")
+
+        ttk.Separator(inner).pack(fill="x", pady=12)
+        links = ttk.Frame(inner)
+        links.pack(anchor="w", pady=(0, 10))
+        ttk.Button(links, text="Open the full user guide", command=lambda: webbrowser.open(help_text.GUIDE_URL)).pack(
+            side="left"
+        )
+        ttk.Button(links, text="Keybinds", command=lambda: self._info("Replacer", help_text.KEYBINDS)).pack(
+            side="left", padx=6
+        )
+        ttk.Button(links, text="Show welcome again", command=self._welcome).pack(side="left")
+        return f
+
+    def _welcome(self) -> None:
+        self.nb.select(self.tab_help)
+        messagebox.showinfo("Welcome to Proxion", help_text.WELCOME)
+        self.cfg.seen_welcome = True
+        cfgmod.save_settings(self.cfg)
+
+    def _info(self, title: str, text: str) -> None:
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.configure(bg=BG)
+        win.transient(self)
+        tk.Label(win, text=text, bg=BG, fg=FG, justify="left", font=("Consolas", 10), padx=16, pady=14).pack()
+        ttk.Button(win, text="OK", command=win.destroy).pack(pady=(0, 12))
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Return>", lambda e: win.destroy())
+
+    # ================================================================ proxy
     def _toggle(self) -> None:
         if self.runner.running:
             self.runner.stop()
         else:
             self._save_settings()
             self._install_cert(quiet=True)  # Roblox updates make new folders
+            if self.cfg.clear_cache_on_start and not roblox.is_running():
+                with contextlib.suppress(RuntimeError, OSError):
+                    roblox.clear_cache()
             try:
                 self.runner.start(self.cfg)
             except (OSError, ValueError) as e:
@@ -727,11 +1116,22 @@ class App(tk.Tk):
 
     def _update_status(self) -> None:
         if self.runner.running:
-            self.status.configure(text="● running", fg="#5be38a")
+            self.status.configure(text="● running", fg=GREEN)
             self.toggle_btn.configure(text="Stop proxy")
         else:
-            self.status.configure(text="● stopped", fg="#ff6b6b")
+            self.status.configure(text="● stopped", fg=RED)
             self.toggle_btn.configure(text="Start proxy")
+
+    def _watch_configs(self) -> None:
+        """Pick up config files changed or dropped into the folder outside Proxion, like Fleasion."""
+        names = tuple(cfgmod.list_configs())
+        f = cfgmod.config_file(self.current)
+        stamp = f.stat().st_mtime_ns if f.exists() else None
+        if stamp != self._disk_stamp:
+            self._switch_config(self.current)  # reloads and clears undo, the history no longer matches the file
+        elif names != self._configs_stamp:
+            self._configs_stamp = names
+            self._refresh_all()
 
     def _tick(self) -> None:
         while not self.out_q.empty():
@@ -742,6 +1142,8 @@ class App(tk.Tk):
             self.out_txt.delete("1.0", f"{lines - MAX_OUTPUT_LINES}.0")
         self._read_log()
         self._update_status()
+        with contextlib.suppress(OSError):
+            self._watch_configs()
         self.after(700, self._tick)
 
     def _on_close(self) -> None:
