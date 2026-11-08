@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -66,8 +67,13 @@ class App(tk.Tk):
         s.configure("TFrame", background=BG)
         s.configure("Small.TButton", padding=(8, 2))
         s.configure("TCombobox", fieldbackground=PANEL, background=PANEL, foreground=FG, arrowcolor=FG)
-        s.map("TCombobox", fieldbackground=[("readonly", PANEL)], foreground=[("readonly", FG)],
-              selectbackground=[("readonly", PANEL)], selectforeground=[("readonly", FG)])
+        s.map(
+            "TCombobox",
+            fieldbackground=[("readonly", PANEL)],
+            foreground=[("readonly", FG)],
+            selectbackground=[("readonly", PANEL)],
+            selectforeground=[("readonly", FG)],
+        )
         self.option_add("*TCombobox*Listbox.background", PANEL)
         self.option_add("*TCombobox*Listbox.foreground", FG)
         self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
@@ -101,15 +107,23 @@ class App(tk.Tk):
         self.config_cb.pack(side="left", padx=6)
         self.config_cb.bind("<<ComboboxSelected>>", lambda e: self._switch_config(self.v_config.get()))
         self.v_cfg_on = tk.BooleanVar()
-        ttk.Checkbutton(bar, text="Turned on", variable=self.v_cfg_on, command=self._toggle_config).pack(side="left", padx=4)
+        ttk.Checkbutton(bar, text="Turned on", variable=self.v_cfg_on, command=self._toggle_config).pack(
+            side="left", padx=4
+        )
         ttk.Button(bar, text="Folder", command=self._open_folder).pack(side="right", padx=2)
         ttk.Button(bar, text="Export…", command=self._export).pack(side="right", padx=2)
-        ttk.Button(bar, text="Open config…", style="Accent.TButton", command=self._open_config).pack(side="right", padx=2)
+        ttk.Button(bar, text="Open config…", style="Accent.TButton", command=self._open_config).pack(
+            side="right", padx=2
+        )
 
         bar2 = ttk.Frame(f)
         bar2.pack(fill="x", pady=(0, 6))
-        for text, cmd in (("New", self._new_config), ("Duplicate", self._dup_config),
-                          ("Rename", self._rename_config), ("Delete", self._del_config)):
+        for text, cmd in (
+            ("New", self._new_config),
+            ("Duplicate", self._dup_config),
+            ("Rename", self._rename_config),
+            ("Delete", self._del_config),
+        ):
             ttk.Button(bar2, text=text, style="Small.TButton", command=cmd).pack(side="left", padx=(0, 4))
         self.active_lbl = ttk.Label(bar2, style="Muted.TLabel")
         self.active_lbl.pack(side="left", padx=10)
@@ -120,7 +134,7 @@ class App(tk.Tk):
         self.rules_tv = ttk.Treeview(body, columns=cols, show="tree headings", selectmode="browse")
         self.rules_tv.heading("#0", text="Name")
         self.rules_tv.column("#0", width=170)
-        for c, w in zip(cols, (30, 150, 55, 150)):
+        for c, w in zip(cols, (30, 150, 55, 150), strict=True):
             self.rules_tv.heading(c, text={"on": "", "with": "Replacement"}.get(c, c.title()))
             self.rules_tv.column(c, width=w, anchor="w")
         self.rules_tv.bind("<<TreeviewSelect>>", lambda e: self._load_selected())
@@ -142,9 +156,15 @@ class App(tk.Tk):
         ttk.Label(ed, text="Replace with").pack(anchor="w")
         modes = ttk.Frame(ed)
         modes.pack(anchor="w", pady=(0, 4))
-        for label, val in (("Asset ID", cfgmod.MODE_ID), ("File", cfgmod.MODE_LOCAL),
-                           ("URL", cfgmod.MODE_CDN), ("Remove", cfgmod.MODE_REMOVE)):
-            ttk.Radiobutton(modes, text=label, value=val, variable=self.v_mode, command=self._mode_changed).pack(side="left", padx=(0, 6))
+        for label, val in (
+            ("Asset ID", cfgmod.MODE_ID),
+            ("File", cfgmod.MODE_LOCAL),
+            ("URL", cfgmod.MODE_CDN),
+            ("Remove", cfgmod.MODE_REMOVE),
+        ):
+            ttk.Radiobutton(modes, text=label, value=val, variable=self.v_mode, command=self._mode_changed).pack(
+                side="left", padx=(0, 6)
+            )
         row = ttk.Frame(ed)
         row.pack(fill="x", pady=(0, 8))
         self.repl_entry = ttk.Entry(row, textvariable=self.v_repl)
@@ -157,9 +177,13 @@ class App(tk.Tk):
         ttk.Button(ed, text="Update selected", command=self._update_rule).pack(fill="x", pady=2)
         ttk.Button(ed, text="Delete selected", command=self._delete_rule).pack(fill="x", pady=2)
         ttk.Button(ed, text="New group", command=self._add_group).pack(fill="x", pady=2)
-        ttk.Label(ed, text="Select a group first to add rules into it.\nDouble click turns a rule on or off.\n"
-                           "Clear the cache or rejoin so Roblox\ndownloads the assets again.",
-                  style="Muted.TLabel", justify="left").pack(anchor="w", pady=(12, 0))
+        ttk.Label(
+            ed,
+            text="Select a group first to add rules into it.\nDouble click turns a rule on or off.\n"
+            "Clear the cache or rejoin so Roblox\ndownloads the assets again.",
+            style="Muted.TLabel",
+            justify="left",
+        ).pack(anchor="w", pady=(12, 0))
         self._mode_changed()
         return f
 
@@ -178,22 +202,35 @@ class App(tk.Tk):
 
         cols = ("id", "type", "action", "replacement", "hits")
         self.log_tv = ttk.Treeview(f, columns=cols, show="headings")
-        for c, w in zip(cols, (140, 120, 80, 260, 60)):
+        for c, w in zip(cols, (140, 120, 80, 260, 60), strict=True):
             self.log_tv.heading(c, text=c.title())
             self.log_tv.column(c, width=w, anchor="w")
         self.log_tv.pack(fill="both", expand=True)
-        ttk.Label(f, text="Every asset Roblox loads while the proxy is on shows up here. Join a game to fill it.",
-                  style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+        ttk.Label(
+            f,
+            text="Every asset Roblox loads while the proxy is on shows up here. Join a game to fill it.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(6, 0))
         return f
 
     def _tools_tab(self, parent) -> ttk.Frame:
         f = ttk.Frame(parent, padding=14)
         ttk.Label(f, text="Capture mode", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         self.v_pmode = tk.StringVar(value=self.cfg.proxy_mode)
-        ttk.Radiobutton(f, text="Local capture: only grabs Roblox's traffic, nothing else on your PC (recommended)",
-                        value="local", variable=self.v_pmode, command=self._save_settings).pack(anchor="w")
-        ttk.Radiobutton(f, text="Regular proxy on a port (advanced, you route traffic to it yourself)",
-                        value="regular", variable=self.v_pmode, command=self._save_settings).pack(anchor="w")
+        ttk.Radiobutton(
+            f,
+            text="Local capture: only grabs Roblox's traffic, nothing else on your PC (recommended)",
+            value="local",
+            variable=self.v_pmode,
+            command=self._save_settings,
+        ).pack(anchor="w")
+        ttk.Radiobutton(
+            f,
+            text="Regular proxy on a port (advanced, you route traffic to it yourself)",
+            value="regular",
+            variable=self.v_pmode,
+            command=self._save_settings,
+        ).pack(anchor="w")
         row = ttk.Frame(f)
         row.pack(anchor="w", pady=6)
         ttk.Label(row, text="Process").pack(side="left")
@@ -282,8 +319,9 @@ class App(tk.Tk):
         self._switch_config(self.cfg.last_config)
 
     def _open_config(self) -> None:
-        paths = filedialog.askopenfilenames(title="Open config (Proxion or Fleasion)",
-                                            filetypes=[("Configs", "*.json"), ("All files", "*.*")])
+        paths = filedialog.askopenfilenames(
+            title="Open config (Proxion or Fleasion)", filetypes=[("Configs", "*.json"), ("All files", "*.*")]
+        )
         if paths:
             self.open_files(paths)
 
@@ -313,8 +351,9 @@ class App(tk.Tk):
         (messagebox.showerror if failed and not opened else messagebox.showinfo)("Proxion", msg)
 
     def _export(self) -> None:
-        p = filedialog.asksaveasfilename(defaultextension=".json", initialfile=f"{self.current}.json",
-                                         filetypes=[("Config", "*.json")])
+        p = filedialog.asksaveasfilename(
+            defaultextension=".json", initialfile=f"{self.current}.json", filetypes=[("Config", "*.json")]
+        )
         if p:
             cfgmod.export_config(self.current, p)
 
@@ -352,18 +391,31 @@ class App(tk.Tk):
                 iid = "/".join(map(str, p))
                 on = "✔" if r.get("enabled", True) is not False else "✖"
                 if r.get("type") == "group":
-                    tv.insert(parent_iid, "end", iid=iid, text=str(r.get("name", "Group")),
-                              values=(on, "", "group", ""), open=r.get("expanded", True))
+                    tv.insert(
+                        parent_iid,
+                        "end",
+                        iid=iid,
+                        text=str(r.get("name", "Group")),
+                        values=(on, "", "group", ""),
+                        open=r.get("expanded", True),
+                    )
                     add(iid, r.get("children") or [], p)
                     continue
                 mode = cfgmod.rule_mode(r)
                 kind, value = cfgmod.rule_action(r)
-                shown = "(removed)" if kind == cfgmod.MODE_REMOVE else {
-                    cfgmod.MODE_ID: r.get("with_id"), cfgmod.MODE_LOCAL: r.get("local_path"),
-                    cfgmod.MODE_CDN: r.get("cdn_url")}.get(mode, "")
+                shown = (
+                    "(removed)"
+                    if kind == cfgmod.MODE_REMOVE
+                    else {
+                        cfgmod.MODE_ID: r.get("with_id"),
+                        cfgmod.MODE_LOCAL: r.get("local_path"),
+                        cfgmod.MODE_CDN: r.get("cdn_url"),
+                    }.get(mode, "")
+                )
                 targets = ", ".join(map(str, r.get("replace_ids") or []))
-                tv.insert(parent_iid, "end", iid=iid, text=str(r.get("name", "Rule")),
-                          values=(on, targets, mode, shown))
+                tv.insert(
+                    parent_iid, "end", iid=iid, text=str(r.get("name", "Rule")), values=(on, targets, mode, shown)
+                )
 
         add("", self.data["replacement_rules"], ())
 
@@ -379,8 +431,11 @@ class App(tk.Tk):
         targets = [int(t) if t.isdigit() else t for t in raw]
         bad = [str(t) for t in targets if cfgmod.parse_target(t) is None]
         if bad and not messagebox.askyesno(
-                "Proxion", "Proxion can't use these targets: " + ", ".join(bad) +
-                "\n(IDs 1 to 80 and unknown names are ignored.)\n\nKeep them anyway?"):
+            "Proxion",
+            "Proxion can't use these targets: "
+            + ", ".join(bad)
+            + "\n(IDs 1 to 80 and unknown names are ignored.)\n\nKeep them anyway?",
+        ):
             return None
         mode = self.v_mode.get()
         repl = self.v_repl.get().strip()
@@ -390,8 +445,12 @@ class App(tk.Tk):
         if mode in (cfgmod.MODE_LOCAL, cfgmod.MODE_CDN) and not repl:
             messagebox.showerror("Proxion", "Pick a file or enter a URL for the replacement.")
             return None
-        rule = {"name": self.v_name.get().strip() or "Rule", "replace_ids": targets,
-                "mode": mode, "enabled": self.v_enabled.get()}
+        rule = {
+            "name": self.v_name.get().strip() or "Rule",
+            "replace_ids": targets,
+            "mode": mode,
+            "enabled": self.v_enabled.get(),
+        }
         if mode == cfgmod.MODE_ID:
             rule["with_id"] = int(repl)
         elif mode == cfgmod.MODE_LOCAL:
@@ -412,8 +471,16 @@ class App(tk.Tk):
         self.v_targets.set(", ".join(map(str, r.get("replace_ids") or [])))
         mode = cfgmod.rule_mode(r)
         self.v_mode.set(mode)
-        self.v_repl.set(str({cfgmod.MODE_ID: r.get("with_id"), cfgmod.MODE_LOCAL: r.get("local_path"),
-                             cfgmod.MODE_CDN: r.get("cdn_url")}.get(mode) or ""))
+        self.v_repl.set(
+            str(
+                {
+                    cfgmod.MODE_ID: r.get("with_id"),
+                    cfgmod.MODE_LOCAL: r.get("local_path"),
+                    cfgmod.MODE_CDN: r.get("cdn_url"),
+                }.get(mode)
+                or ""
+            )
+        )
         self._mode_changed()
 
     def _persist(self, select: tuple | None = None) -> None:
@@ -470,8 +537,11 @@ class App(tk.Tk):
         if path is None:
             return
         node = self._node(path)
-        if node.get("type") == "group" and node.get("children") and not messagebox.askyesno(
-                "Proxion", f'Delete the group "{node.get("name")}" and everything in it?'):
+        if (
+            node.get("type") == "group"
+            and node.get("children")
+            and not messagebox.askyesno("Proxion", f'Delete the group "{node.get("name")}" and everything in it?')
+        ):
             return
         del self._parent_list(path)[path[-1]]
         self._persist()
@@ -489,8 +559,13 @@ class App(tk.Tk):
         self.browse_btn.configure(state="normal" if m == cfgmod.MODE_LOCAL else "disabled")
 
     def _browse(self) -> None:
-        p = filedialog.askopenfilename(title="Replacement file", filetypes=[
-            ("Common assets", "*.png *.jpg *.jpeg *.ogg *.mp3 *.mesh *.obj *.rbxm *.ktx"), ("All files", "*.*")])
+        p = filedialog.askopenfilename(
+            title="Replacement file",
+            filetypes=[
+                ("Common assets", "*.png *.jpg *.jpeg *.ogg *.mp3 *.mesh *.obj *.rbxm *.ktx"),
+                ("All files", "*.*"),
+            ],
+        )
         if p:
             self.v_repl.set(p)
 
@@ -530,10 +605,8 @@ class App(tk.Tk):
 
     def _clear_log(self) -> None:
         self.seen.clear()
-        try:
+        with contextlib.suppress(OSError):
             cfgmod.log_path().write_text("")
-        except OSError:
-            pass
         self.log_pos = 0
         self._redraw_log()
 
@@ -571,8 +644,12 @@ class App(tk.Tk):
             if not quiet:
                 messagebox.showwarning("Proxion", "No Roblox install found. Install Roblox, then try again.")
         elif not quiet:
-            messagebox.showinfo("Proxion", f"Certificate installed in {len(patched)} new Roblox folder(s)."
-                                if patched else "Certificate is already installed.")
+            messagebox.showinfo(
+                "Proxion",
+                f"Certificate installed in {len(patched)} new Roblox folder(s)."
+                if patched
+                else "Certificate is already installed.",
+            )
 
     def _uninstall_cert(self) -> None:
         n = len(roblox.uninstall_cert())

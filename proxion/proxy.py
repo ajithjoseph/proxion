@@ -6,8 +6,8 @@ import os
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from . import config as cfgmod
 
@@ -24,10 +24,14 @@ def _mitmdump() -> list[str]:
 
 def build_command(cfg: cfgmod.Config) -> list[str]:
     cmd = _mitmdump() + [
-        "-s", str(ADDON),
-        "--set", f"confdir={cfgmod.cert_dir()}",
-        "--set", "flow_detail=0",
-        "--set", "termlog_verbosity=warn",
+        "-s",
+        str(ADDON),
+        "--set",
+        f"confdir={cfgmod.cert_dir()}",
+        "--set",
+        "flow_detail=0",
+        "--set",
+        "termlog_verbosity=warn",
     ]
     if cfg.proxy_mode == "local":
         cmd += ["--mode", f"local:{cfg.capture_process}"]
@@ -61,7 +65,8 @@ class ProxyRunner:
 
     def _pump(self) -> None:
         proc = self.proc
-        assert proc and proc.stdout
+        if proc is None or proc.stdout is None:
+            return
         for line in proc.stdout:
             self.on_output(line.rstrip())
         self.on_output(f"[proxy exited with code {proc.wait()}]")

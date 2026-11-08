@@ -150,10 +150,13 @@ class Proxion:
             if action is None and isinstance(type_id, int):
                 action = self.rules.by_type.get(type_id)  # whole-type rule
             if original is not None:
-                self._log(assetId=original, typeId=type_id,
-                          type=ASSET_TYPES.get(type_id, str(type_id) if type_id else "?"),
-                          action=action[0] if action else "none",
-                          replacement=action[1] if action else None)
+                self._log(
+                    assetId=original,
+                    typeId=type_id,
+                    type=ASSET_TYPES.get(type_id, str(type_id) if type_id else "?"),
+                    action=action[0] if action else "none",
+                    replacement=action[1] if action else None,
+                )
             if not action or action[0] == cfgmod.MODE_ID:
                 continue
             kind, value = action
@@ -174,13 +177,17 @@ class Proxion:
     # ---- legacy single asset endpoint ----------------------------------
     def _rewrite_single(self, flow: http.HTTPFlow) -> None:
         q = flow.request.query
-        key = next((k for k in q.keys() if k.lower() == "id"), None)
+        key = next((k for k in q if k.lower() == "id"), None)
         if key is None or not q[key].isdigit():
             return
         asset_id = int(q[key])
         action = self.rules.by_id.get(asset_id)
-        self._log(assetId=asset_id, type="?", action=action[0] if action else "none",
-                  replacement=action[1] if action else None)
+        self._log(
+            assetId=asset_id,
+            type="?",
+            action=action[0] if action else "none",
+            replacement=action[1] if action else None,
+        )
         if not action:
             return
         kind, value = action
@@ -196,7 +203,7 @@ class Proxion:
 
     # ---- local files ---------------------------------------------------
     def _serve_file(self, flow: http.HTTPFlow) -> None:
-        raw = flow.request.path[len(FILE_PREFIX):].split("?")[0]
+        raw = flow.request.path[len(FILE_PREFIX) :].split("?")[0]
         path = self.files.get(int(raw)) if raw.isdigit() else None
         if path is None:
             flow.response = http.Response.make(404, b"Unknown Proxion file")

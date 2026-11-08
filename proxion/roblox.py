@@ -24,7 +24,7 @@ def version_dirs() -> list[Path]:
         _local_appdata() / "Roblox" / "Versions",
         _local_appdata() / "Bloxstrap" / "Versions",
         _local_appdata() / "Fishstrap" / "Versions",
-        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Roblox" / "Versions",
+        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Roblox" / "Versions",
     ]
     extra = os.environ.get("PROXION_ROBLOX_VERSIONS")
     if extra:
@@ -91,7 +91,7 @@ def _strip_block(text: str) -> str:
         if end == -1:
             text = text[:start]
             break
-        text = text[:start].rstrip("\n") + "\n" + text[end + len(MARKER):].lstrip("\n")
+        text = text[:start].rstrip("\n") + "\n" + text[end + len(MARKER) :].lstrip("\n")
     return text
 
 
@@ -100,7 +100,9 @@ def is_running() -> bool:
         return False
     try:
         out = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ).stdout.lower()
     except OSError:

@@ -17,15 +17,15 @@ preserved when the file is saved again.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import locale
 import os
-import re
 import shutil
 import sys
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 APP_NAME = "Proxion"
 
@@ -37,21 +37,64 @@ MODES = (MODE_ID, MODE_LOCAL, MODE_CDN, MODE_REMOVE)
 
 # Roblox asset type ids. Names can be used in replace_ids to hit every asset of a type.
 ASSET_TYPES = {
-    1: "Image", 2: "TShirt", 3: "Audio", 4: "Mesh", 5: "Lua", 8: "Hat", 9: "Place",
-    10: "Model", 11: "Shirt", 12: "Pants", 13: "Decal", 17: "Head", 18: "Face",
-    19: "Gear", 21: "Badge", 24: "Animation", 27: "Torso", 28: "RightArm",
-    29: "LeftArm", 30: "LeftLeg", 31: "RightLeg", 32: "Package", 34: "GamePass",
-    38: "Plugin", 40: "MeshPart", 41: "HairAccessory", 42: "FaceAccessory",
-    43: "NeckAccessory", 44: "ShoulderAccessory", 45: "FrontAccessory",
-    46: "BackAccessory", 47: "WaistAccessory", 48: "ClimbAnimation",
-    49: "DeathAnimation", 50: "FallAnimation", 51: "IdleAnimation",
-    52: "JumpAnimation", 53: "RunAnimation", 54: "SwimAnimation",
-    55: "WalkAnimation", 56: "PoseAnimation", 61: "EmoteAnimation", 62: "Video",
-    63: "TexturePack", 64: "TShirtAccessory", 65: "ShirtAccessory",
-    66: "PantsAccessory", 67: "JacketAccessory", 68: "SweaterAccessory",
-    69: "ShortsAccessory", 70: "LeftShoeAccessory", 71: "RightShoeAccessory",
-    72: "DressSkirtAccessory", 73: "FontFamily", 76: "EyebrowAccessory",
-    77: "EyelashAccessory", 78: "MoodAnimation", 79: "DynamicHead",
+    1: "Image",
+    2: "TShirt",
+    3: "Audio",
+    4: "Mesh",
+    5: "Lua",
+    8: "Hat",
+    9: "Place",
+    10: "Model",
+    11: "Shirt",
+    12: "Pants",
+    13: "Decal",
+    17: "Head",
+    18: "Face",
+    19: "Gear",
+    21: "Badge",
+    24: "Animation",
+    27: "Torso",
+    28: "RightArm",
+    29: "LeftArm",
+    30: "LeftLeg",
+    31: "RightLeg",
+    32: "Package",
+    34: "GamePass",
+    38: "Plugin",
+    40: "MeshPart",
+    41: "HairAccessory",
+    42: "FaceAccessory",
+    43: "NeckAccessory",
+    44: "ShoulderAccessory",
+    45: "FrontAccessory",
+    46: "BackAccessory",
+    47: "WaistAccessory",
+    48: "ClimbAnimation",
+    49: "DeathAnimation",
+    50: "FallAnimation",
+    51: "IdleAnimation",
+    52: "JumpAnimation",
+    53: "RunAnimation",
+    54: "SwimAnimation",
+    55: "WalkAnimation",
+    56: "PoseAnimation",
+    61: "EmoteAnimation",
+    62: "Video",
+    63: "TexturePack",
+    64: "TShirtAccessory",
+    65: "ShirtAccessory",
+    66: "PantsAccessory",
+    67: "JacketAccessory",
+    68: "SweaterAccessory",
+    69: "ShortsAccessory",
+    70: "LeftShoeAccessory",
+    71: "RightShoeAccessory",
+    72: "DressSkirtAccessory",
+    73: "FontFamily",
+    76: "EyebrowAccessory",
+    77: "EyelashAccessory",
+    78: "MoodAnimation",
+    79: "DynamicHead",
 }
 TYPE_BY_NAME = {v.lower(): k for k, v in ASSET_TYPES.items()}
 RESERVED_MAX = 80  # Fleasion ignores bare ids 1..80 because they clash with type ids
@@ -101,7 +144,7 @@ class Settings:
     proxy_port: int = 8080
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Settings":
+    def from_dict(cls, d: dict) -> Settings:
         s = cls()
         for k in asdict(s):
             if k in d:
@@ -119,10 +162,8 @@ def load_settings() -> Settings:
     p = settings_path()
     s = Settings()
     if p.exists():
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             s = Settings.from_dict(json.loads(p.read_text(encoding="utf-8")))
-        except (ValueError, TypeError):
-            pass
     if not list_configs():
         write_config("Default", empty_config())
     return s
@@ -147,8 +188,12 @@ def _migrate_v0() -> None:
     rules = []
     for r in data.get("rules", []):
         mode = {"file": MODE_LOCAL}.get(r.get("mode"), r.get("mode", MODE_ID))
-        rule = {"name": r.get("name", "Rule"), "replace_ids": r.get("targets", []),
-                "mode": mode, "enabled": r.get("enabled", True)}
+        rule = {
+            "name": r.get("name", "Rule"),
+            "replace_ids": r.get("targets", []),
+            "mode": mode,
+            "enabled": r.get("enabled", True),
+        }
         if mode == MODE_ID:
             rule["with_id"] = r.get("replacement", "")
         elif mode == MODE_LOCAL:
@@ -213,7 +258,7 @@ def write_config(name: str, data: dict) -> None:
 def check_name(name: str) -> str:
     name = name.strip()
     if not name or any(c in BAD_NAME_CHARS for c in name) or name in (".", ".."):
-        raise ValueError(f'Config names can\'t be empty or use any of  {BAD_NAME_CHARS}')
+        raise ValueError(f"Config names can't be empty or use any of  {BAD_NAME_CHARS}")
     return name
 
 
@@ -331,6 +376,7 @@ def resolve_local_path(p: str) -> str:
 @dataclass
 class Compiled:
     """Everything the proxy needs, flattened from all enabled configs."""
+
     by_id: dict[int, tuple[str, object]] = field(default_factory=dict)
     by_type: dict[int, tuple[str, object]] = field(default_factory=dict)
     skipped: int = 0  # targets we couldn't use
