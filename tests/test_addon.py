@@ -83,14 +83,15 @@ def test_local_file_served(make, home):
     (folder / "sky.png").write_bytes(b"\x89PNGfake")
     p = make([{"replace_ids": [111111], "mode": "local", "local_path": "/Sky/sky.png"}])  # Fleasion relative path
     _, out = roundtrip(p, [{"assetId": 111111, "requestId": "0"}], [ok("0")])
-    assert out[0]["locations"][0]["location"] == f"https://assetdelivery.roblox.com{FILE_PREFIX}111111"
+    location = out[0]["locations"][0]["location"]
+    assert location.startswith(f"https://assetdelivery.roblox.com{FILE_PREFIX}")
     g = tflow.tflow(
         req=tutils.treq(
             host="assetdelivery.roblox.com",
             port=443,
             scheme=b"https",
             method=b"GET",
-            path=f"{FILE_PREFIX}111111".encode(),
+            path=location.split("roblox.com", 1)[1].encode(),
         )
     )
     p.request(g)

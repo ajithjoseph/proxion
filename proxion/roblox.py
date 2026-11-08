@@ -50,48 +50,70 @@ def ca_cert_file() -> Path:
     return pem
 
 
-def install_cert() -> list[Path]:
+def _read_bundle(bundle: Path) -> str:
+    # latin-1 maps every byte to one character, so writing back gives the exact same bytes
+    return bundle.read_bytes().decode("latin-1") if bundle.exists() else ""
+
+
+def _write_bundle(bundle: Path, text: str) -> None:
+    tmp = bundle.with_name(bundle.name + ".proxion-tmp")
+    tmp.write_bytes(text.encode("latin-1"))
+    os.replace(tmp, bundle)  # a crash mid-write can't leave Roblox with a broken bundle
+
+
+def install_cert() -> tuple[list[Path], list[str]]:
     """Append our CA to ssl/cacert.pem in each Roblox version folder.
 
     Roblox ships its own CA bundle and ignores the Windows store, which is why
     this step is needed. Roblox updates create new folders, so run it again
     after an update (the GUI does this every time you start the proxy).
+
+    Returns (bundles patched, error messages for folders we couldn't write).
     """
     ca = ca_cert_file().read_text(encoding="ascii").strip()
     block = f"\n{MARKER}\n{ca}\n{MARKER}\n"
-    patched = []
+    patched, failed = [], []
     for vdir in version_dirs():
         bundle = vdir / "ssl" / "cacert.pem"
-        bundle.parent.mkdir(exist_ok=True)
-        text = bundle.read_text(encoding="ascii", errors="ignore") if bundle.exists() else ""
-        if ca in text:
-            continue
-        text = _strip_block(text)  # drop an older Proxion CA if there is one
-        bundle.write_text(text.rstrip("\n") + "\n" + block, encoding="ascii")
-        patched.append(bundle)
-    return patched
+        try:
+            bundle.parent.mkdir(exist_ok=True)
+            text = _read_bundle(bundle)
+            if ca in text:
+                continue
+            text = _strip_block(text)  # drop an older Proxion CA if there is one
+            _write_bundle(bundle, text.rstrip("\n") + "\n" + block)
+            patched.append(bundle)
+        except OSError as e:
+            failed.append(f"{vdir}: {e}")
+    return patched, failed
 
 
-def uninstall_cert() -> list[Path]:
-    cleaned = []
+def uninstall_cert() -> tuple[list[Path], list[str]]:
+    cleaned, failed = [], []
     for vdir in version_dirs():
         bundle = vdir / "ssl" / "cacert.pem"
-        if bundle.exists():
-            text = bundle.read_text(encoding="ascii", errors="ignore")
+        try:
+            text = _read_bundle(bundle)
             if MARKER in text:
-                bundle.write_text(_strip_block(text), encoding="ascii")
+                _write_bundle(bundle, _strip_block(text))
                 cleaned.append(bundle)
-    return cleaned
+        except OSError as e:
+            failed.append(f"{vdir}: {e}")
+    return cleaned, failed
 
 
 def _strip_block(text: str) -> str:
+    """Remove Proxion's CA blocks and nothing else, even if a block is cut off."""
     while MARKER in text:
         start = text.index(MARKER)
         end = text.find(MARKER, start + len(MARKER))
-        if end == -1:
-            text = text[:start]
-            break
-        text = text[:start].rstrip("\n") + "\n" + text[end + len(MARKER) :].lstrip("\n")
+        if end != -1:
+            end += len(MARKER)
+        else:
+            # Unmatched marker: drop only our own certificate after it, keep the real CAs.
+            cert_end = text.find("-----END CERTIFICATE-----", start)
+            end = cert_end + len("-----END CERTIFICATE-----") if cert_end != -1 else start + len(MARKER)
+        text = text[:start].rstrip("\n") + "\n" + text[end:].lstrip("\n")
     return text
 
 

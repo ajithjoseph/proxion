@@ -44,13 +44,19 @@ def main() -> None:
     from . import config, roblox
 
     if args.cmd == "install-cert":
-        for f in roblox.install_cert():
+        patched, failed = roblox.install_cert()
+        for f in patched:
             print("patched", f)
+        for err in failed:
+            print("could not patch", err)
         if not roblox.version_dirs():
             print("No Roblox install found.")
     elif args.cmd == "uninstall-cert":
-        for f in roblox.uninstall_cert():
+        cleaned, failed = roblox.uninstall_cert()
+        for f in cleaned:
             print("cleaned", f)
+        for err in failed:
+            print("could not clean", err)
     elif args.cmd == "clear-cache":
         for f in roblox.clear_cache():
             print("removed", f)

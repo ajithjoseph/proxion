@@ -18,14 +18,17 @@ preserved when the file is saved again.
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
 import locale
 import os
+import re
 import shutil
 import sys
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 APP_NAME = "Proxion"
 
@@ -99,6 +102,11 @@ ASSET_TYPES = {
 TYPE_BY_NAME = {v.lower(): k for k, v in ASSET_TYPES.items()}
 RESERVED_MAX = 80  # Fleasion ignores bare ids 1..80 because they clash with type ids
 BAD_NAME_CHARS = '\\/:*?"<>|'
+# Windows device names that can't be used as file names, with or without an extension
+RESERVED_NAMES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+MAX_CONFIG_BYTES = 20 * 1024 * 1024  # configs are small text files, anything bigger is not a config
+MAX_GROUP_DEPTH = 32
+_ID_RE = re.compile(r"[0-9]{1,19}", re.ASCII)  # fits in int64, rejects "²" and other unicode digits
 
 
 # ---------------------------------------------------------------- folders
@@ -255,15 +263,30 @@ def write_config(name: str, data: dict) -> None:
     _atomic_write(config_file(name), json.dumps(data, indent=2))
 
 
+def _is_reserved(name: str) -> bool:
+    return name.split(".")[0].strip().lower() in RESERVED_NAMES
+
+
 def check_name(name: str) -> str:
     name = name.strip()
-    if not name or any(c in BAD_NAME_CHARS for c in name) or name in (".", ".."):
-        raise ValueError(f"Config names can't be empty or use any of  {BAD_NAME_CHARS}")
+    if (
+        not name
+        or any(c in BAD_NAME_CHARS or ord(c) < 32 for c in name)
+        or name.endswith(".")
+        or name in (".", "..")
+        or _is_reserved(name)
+    ):
+        raise ValueError(
+            f"Config names can't be empty, end with a dot, use any of  {BAD_NAME_CHARS}  "
+            "or be a Windows device name like CON or NUL"
+        )
     return name
 
 
 def unique_name(base: str) -> str:
-    base = "".join("_" if c in BAD_NAME_CHARS else c for c in base).strip() or "Config"
+    base = "".join("_" if c in BAD_NAME_CHARS or ord(c) < 32 else c for c in base).strip().rstrip(".") or "Config"
+    if _is_reserved(base):
+        base = f"{base}_"
     existing = {n.lower() for n in list_configs()}
     name, i = base, 2
     while name.lower() in existing:
@@ -311,7 +334,14 @@ def import_config(path: str | Path) -> str:
     Returns the name it was saved under. Raises ValueError if it isn't a config.
     """
     path = Path(path)
-    data = normalize(decode_json_bytes(path.read_bytes()))
+    if not path.is_file():
+        raise ValueError("not a file")
+    if path.stat().st_size > MAX_CONFIG_BYTES:
+        raise ValueError(f"too big for a config (over {MAX_CONFIG_BYTES // (1024 * 1024)} MB)")
+    try:
+        data = normalize(decode_json_bytes(path.read_bytes()))
+    except RecursionError as e:  # absurdly nested JSON
+        raise ValueError("config is nested too deeply") from e
     name = unique_name(path.stem)
     write_config(name, data)  # re-written as clean UTF-8
     return name
@@ -330,6 +360,8 @@ def _atomic_write(path: Path, text: str) -> None:
 # ---------------------------------------------------------------- rules
 def iter_rules(rules: list, group_enabled: bool = True, path: tuple = ()) -> Iterator[tuple[tuple, dict, bool]]:
     """Yield (index path, rule, effective enabled) for every rule, walking into groups."""
+    if not isinstance(rules, list) or len(path) > MAX_GROUP_DEPTH:
+        return
     for i, r in enumerate(rules):
         if not isinstance(r, dict):
             continue
@@ -347,12 +379,21 @@ def rule_mode(r: dict) -> str:
     return mode if mode in MODES else MODE_ID
 
 
+def as_asset_id(v) -> int | None:
+    """Parse an asset id from an int or a plain ASCII digit string, else None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v if 0 < v < 2**63 else None
+    if isinstance(v, str) and _ID_RE.fullmatch(v.strip()):
+        return int(v.strip())
+    return None
+
+
 def parse_target(t) -> tuple[str, object] | None:
     """Turn one replace_ids entry into ("id", 123) or ("type", 8), or None if unsupported."""
-    if isinstance(t, bool):
-        return None
-    if isinstance(t, int) or (isinstance(t, str) and t.strip().isdigit()):
-        n = int(t)
+    n = as_asset_id(t)
+    if n is not None:
         return ("id", n) if n > RESERVED_MAX else None
     if isinstance(t, str):
         key = t.strip().replace(" ", "").lower()
@@ -361,9 +402,55 @@ def parse_target(t) -> tuple[str, object] | None:
     return None  # slot keys like "123:1" and R15Animation style selectors
 
 
+def local_path_problem(p: str) -> str | None:
+    """Why a local_path can't be used, or None if it's fine.
+
+    Network paths (\\\\server\\share, //server/share) are refused because opening them makes
+    Windows send your login hash to that server. Device paths can hang or eat memory.
+    """
+    p = p.strip()
+    if not p:
+        return "empty path"
+    if p.startswith(("\\\\", "//")) or "\\\\?\\" in p or "\\\\.\\" in p:
+        return "network and device paths are not allowed"
+    if "%" in p or p.startswith("~"):
+        return "environment variables and ~ are not allowed"
+    if _is_reserved(Path(p.replace("\\", "/")).name):
+        return "Windows device names are not allowed"
+    return None
+
+
+def is_inside_configs(p: str) -> bool:
+    try:
+        return Path(p).resolve().is_relative_to(configs_dir().resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def url_problem(u: str) -> str | None:
+    """Why a cdn_url can't be used, or None if it's fine."""
+    try:
+        parts = urlsplit(u.strip())
+    except ValueError:
+        return "not a valid URL"
+    if parts.scheme != "https":
+        return "only https:// links are allowed"
+    host = (parts.hostname or "").lower()
+    if not host:
+        return "the link has no host"
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".lan")):
+        return "links to your own PC or network are not allowed"
+    try:
+        ipaddress.ip_address(host)
+        return "links to bare IP addresses are not allowed"
+    except ValueError:
+        pass
+    return None
+
+
 def resolve_local_path(p: str) -> str:
     """Fleasion style: "/Folder/file.png" means configs/Folder/file.png."""
-    p = os.path.expandvars(os.path.expanduser(p))
+    p = p.strip()
     if p.startswith("/") and not p.startswith("//") and "\\" not in p:
         parts = [x for x in p.split("/") if x]
         if parts and not any(x in (".", "..") for x in parts):
@@ -380,19 +467,36 @@ class Compiled:
     by_id: dict[int, tuple[str, object]] = field(default_factory=dict)
     by_type: dict[int, tuple[str, object]] = field(default_factory=dict)
     skipped: int = 0  # targets we couldn't use
+    problems: list[str] = field(default_factory=list)  # rules ignored because they're unsafe or broken
+
+
+INVALID = "invalid"  # rule_action result for a rule that must be ignored
 
 
 def rule_action(r: dict) -> tuple[str, object]:
+    """(mode, value) for a rule. ("invalid", reason) means the rule is ignored.
+
+    Like Fleasion, an id/local/cdn rule with an empty replacement removes the asset.
+    """
     mode = rule_mode(r)
     if mode == MODE_ID:
-        w = str(r.get("with_id") or "").strip()
-        return (MODE_ID, int(w)) if w.isdigit() else (MODE_REMOVE, None)
+        raw = r.get("with_id")
+        if raw is None or str(raw).strip() == "":
+            return (MODE_REMOVE, None)
+        n = as_asset_id(raw)
+        return (MODE_ID, n) if n is not None else (INVALID, f"with_id {raw!r} is not an asset id")
     if mode == MODE_LOCAL:
         p = str(r.get("local_path") or "").strip()
-        return (MODE_LOCAL, resolve_local_path(p)) if p else (MODE_REMOVE, None)
+        if not p:
+            return (MODE_REMOVE, None)
+        problem = local_path_problem(p)
+        return (INVALID, f"{p}: {problem}") if problem else (MODE_LOCAL, resolve_local_path(p))
     if mode == MODE_CDN:
         u = str(r.get("cdn_url") or "").strip()
-        return (MODE_CDN, u) if u else (MODE_REMOVE, None)
+        if not u:
+            return (MODE_REMOVE, None)
+        problem = url_problem(u)
+        return (INVALID, f"{u}: {problem}") if problem else (MODE_CDN, u)
     return (MODE_REMOVE, None)
 
 
@@ -403,7 +507,13 @@ def compile_rules(config_datas: list[dict]) -> Compiled:
             if not on:
                 continue
             action = rule_action(rule)
-            for t in rule.get("replace_ids") or []:
+            if action[0] == INVALID:
+                out.problems.append(f"{rule.get('name', 'Rule')}: {action[1]}")
+                continue
+            targets = rule.get("replace_ids") or []
+            if not isinstance(targets, list):
+                targets = [targets]
+            for t in targets:
                 parsed = parse_target(t)
                 if parsed is None:
                     out.skipped += 1
@@ -420,3 +530,20 @@ def compile_enabled(settings: Settings | None = None) -> Compiled:
     settings = settings or load_settings()
     names = [n for n in settings.enabled_configs if config_file(n).exists()]
     return compile_rules([read_config(n) for n in names])
+
+
+def review_config(data: dict) -> list[str]:
+    """Things a user should know before turning on a config someone else made."""
+    notes, hosts = [], set()
+    for _, rule, _on in iter_rules(data.get("replacement_rules", [])):
+        name = rule.get("name", "Rule")
+        kind, value = rule_action(rule)
+        if kind == INVALID:
+            notes.append(f"Ignored, unsafe or broken: {name}: {value}")
+        elif kind == MODE_LOCAL and not is_inside_configs(value):
+            notes.append(f"Uses a file outside the configs folder: {value}")
+        elif kind == MODE_CDN:
+            hosts.add(urlsplit(value).hostname)
+    if hosts:
+        notes.append("Downloads replacements from: " + ", ".join(sorted(hosts)))
+    return notes
