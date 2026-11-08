@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -16,13 +15,11 @@ ADDON = Path(__file__).resolve().parent / "addon.py"
 
 
 def _mitmdump() -> list[str]:
-    if not getattr(sys, "frozen", False):
-        # Same Python that runs Proxion, so it always finds the right mitmproxy.
-        return [sys.executable, "-c", "import sys; from mitmproxy.tools.main import mitmdump; sys.exit(mitmdump())"]
-    exe = shutil.which("mitmdump")
-    if not exe:
-        raise FileNotFoundError("mitmdump not found. Install mitmproxy: pip install mitmproxy")
-    return [exe]
+    if getattr(sys, "frozen", False):
+        # Single exe build: Proxion.exe runs mitmdump itself (see __main__.py).
+        return [sys.executable, "__mitmdump"]
+    # Same Python that runs Proxion, so it always finds the right mitmproxy.
+    return [sys.executable, "-c", "import sys; from mitmproxy.tools.main import mitmdump; sys.exit(mitmdump())"]
 
 
 def build_command(cfg: cfgmod.Config) -> list[str]:

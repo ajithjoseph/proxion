@@ -3,6 +3,12 @@ import sys
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "__mitmdump":
+        # Used by the single exe build to run the proxy as a child process.
+        from mitmproxy.tools.main import mitmdump
+        mitmdump(sys.argv[2:])
+        return
+
     p = argparse.ArgumentParser(prog="proxion", description="Roblox asset replacer")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("gui", help="open the window (default)")

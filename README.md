@@ -16,11 +16,23 @@ for other ones, for your own files, or remove them. Changes only show up on **yo
 Roblox only trusts its own certificate list (`ssl/cacert.pem` inside each version folder), so
 Proxion adds its certificate there. Bloxstrap and Fishstrap installs are handled too.
 
-## Quick start (Windows)
+## Getting Proxion.exe
 
-1. Install Python 3.11 or newer from python.org (tick "Add to PATH").
-2. Double click `run.bat`. The first run installs mitmproxy.
-3. Add a rule in **Replacements**.
+Proxion builds into one `Proxion.exe`, no Python needed to run it. Two ways to get it:
+
+* **GitHub (no setup):** push this folder to a GitHub repo. The workflow in
+  `.github/workflows/build.yml` builds the exe on Windows, tests it, and puts it under the
+  run's *Artifacts*. Push a tag like `v0.1.0` and it also attaches the exe to a Release.
+* **Your own PC:** install Python 3.12+ from python.org, then double click `build.bat`.
+  The exe lands in `dist\Proxion.exe`.
+
+Windows SmartScreen may warn the first time because the exe isn't code signed. Click
+*More info* then *Run anyway*.
+
+## Quick start
+
+1. Open `Proxion.exe` (or `run.bat` if you're running from source).
+2. Add a rule in **Replacements**.
 4. Close Roblox, press **Clear Roblox cache** in *Setup & tools*, then **Start proxy**.
 5. Open Roblox and join a game.
 
